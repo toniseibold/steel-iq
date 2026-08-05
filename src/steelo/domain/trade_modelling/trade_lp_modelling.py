@@ -406,13 +406,12 @@ class TradeLPModel:
         self._external_distance_function = distance_function
         self._pc_by_name: dict[str, ProcessCenter] | None = None
 
-        # Solver options for performance tuning (OPT-4)
-        # Default to IPM - equivalent runtime to Simplex but uses ~5GB less memory
+        # Solver options for gurobi
         self.solver_options: dict[str, Any] = {
-            "solver": "ipm",
-            "presolve": "on",
-            "scaling": "on",
-            "run_crossover": "on",
+            "Method": 2,
+            "Presolve": 2,
+            "ScaleFlag": 1,
+            "Crossover": 1,
         }
 
         # Warm-start support (OPT-2) - previous year's solution for faster convergence
@@ -1742,12 +1741,11 @@ class TradeLPModel:
         """
         logger = logging.getLogger(f"{__name__}.solve_lp_model")
         start_time = time.time()
-        solver = pyo.SolverFactory("appsi_highs")
-        solver.options["random_seed"] = self.random_seed
+        solver = pyo.SolverFactory("gurobi")
+        solver.options["Seed"] = self.random_seed
 
         # Use configurable solver options for performance tuning (OPT-4)
         solver.options.update(self.solver_options)
-        solver.config.load_solution = False  # Don't try to load infeasible solution
 
         # Warm-start from previous year's solution if available (OPT-2)
         # NOTE: HiGHS Appsi only supports warm starts for simplex solver, not IPM

@@ -19,7 +19,6 @@ dependencies = [
     "pycountry",
     "scipy",
     "pydantic",
-    "mocker",
     "matplotlib",
     "sentry-sdk",
     "osmnx",
@@ -35,6 +34,7 @@ dependencies = [
     "ipython",
     "reverse-geocoder",
     "highspy>=1.9.0",
+    "gurobipy",
     "numba>=0.61.2",
     # Django Frontend
     "django",
