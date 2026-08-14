@@ -1,0 +1,11 @@
+.venv
+.ruff_cache
+.pytest_cache
+.github
+.git
+.python-version
+.gitattributes
+.gitignore
+.pre-commit-config.yaml
+output
+**/output*/

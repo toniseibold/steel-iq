@@ -407,22 +407,24 @@ class TradeLPModel:
         self._external_distance_function = distance_function
         self._pc_by_name: dict[str, ProcessCenter] | None = None
 
-        # Solver options for performance tuning (OPT-4)
-        # Default to HiPO - HiGHS 1.15's interior-point solver (requires highspy[extras]).
-        # Like IPM it does not support warm starts; keeps IPM's low memory footprint.
-        # Override for A/B benchmarking via env var, e.g. STEELO_LP_SOLVER=simplex.
+        # Gurobi barrier configuration. Warm starts remain disabled because this
+        # continuous LP only retains primal allocation values, not an LP basis or
+        # the primal/dual start vectors needed for an effective barrier warm start.
         self.solver_options: dict[str, Any] = {
-            "solver": os.environ.get("STEELO_LP_SOLVER", "hipo"),
-            "presolve": "on",
-            "scaling": "on",
-            "run_crossover": "on",
-            # Emit HiGHS logs so we can confirm which algorithm actually ran
-            # (look for "Running HiPO" / "Using dual simplex solver" / "IPX version").
-            "output_flag": "true",
-            "log_to_console": "true",
+            "Method": 2,
+            "Presolve": 2,
+            "ScaleFlag": 1,
+            "Crossover": 1,
         }
 
-        # Warm-start support (OPT-2) - previous year's solution for faster convergence
+        # Prevent Gurobi from using more CPUs than a SLURM job requested. Outside
+        # SLURM, leave Threads unset so Gurobi can choose its normal default.
+        slurm_cpus = os.environ.get("SLURM_CPUS_PER_TASK")
+        if slurm_cpus:
+            self.solver_options["Threads"] = int(slurm_cpus)
+
+        # Retained for compatibility with callers that cache the previous solution;
+        # Gurobi barrier does not consume these primal-only values.
         self.previous_solution: dict[tuple[str, str, str], float] | None = None
 
     def add_transportation_costs(self, transportation_costs: list[TransportationCost]) -> None:
@@ -1748,9 +1750,9 @@ class TradeLPModel:
         self.add_objective_function_to_lp()
 
     def solve_lp_model(self):
-        """Solve the LP optimization problem using HiGHS solver.
+        """Solve the LP optimization problem using Gurobi.
 
-        Solves the built LP model using configurable solver options with warm-start support.
+        Solves the built LP model using configurable Gurobi options.
         Returns solver results including termination condition and solution status.
 
         Returns:
@@ -1759,50 +1761,23 @@ class TradeLPModel:
                 - solver.termination_condition: Why solver stopped (optimal, infeasible, etc.)
 
         Notes:
-            - Uses solver_options for configuration (default: IPM for memory efficiency)
-            - Supports warm-starting from previous_solution (simplex only)
+            - Uses the barrier method by default
+            - Does not warm-start because no LP basis or dual start is retained
             - Random seed from SimulationConfig.random_seed for reproducibility
             - Does not automatically load solution (call extract_solution() after)
             - Logs detailed diagnostics if model is infeasible
         """
         logger = logging.getLogger(f"{__name__}.solve_lp_model")
         start_time = time.time()
-        solver = pyo.SolverFactory("appsi_highs")
-        solver.options["random_seed"] = self.random_seed
+        solver = pyo.SolverFactory("gurobi")
+        solver.options["Seed"] = self.random_seed
 
         # Use configurable solver options for performance tuning (OPT-4)
         solver.options.update(self.solver_options)
-        solver.config.load_solution = False  # Don't try to load infeasible solution
 
-        # Warm-start from previous year's solution if available (OPT-2)
-        # NOTE: HiGHS Appsi only supports warm starts for simplex solver, not IPM/HiPO
-        warm_start_enabled = False
-        solver_type = self.solver_options.get("solver", "hipo")
-        n_vars = self.lp_model.nvariables()
-
-        if hasattr(self, "previous_solution") and self.previous_solution is not None:
-            if solver_type == "simplex":
-                warm_start_count = 0
-                for (from_pc, to_pc, comm), value in self.previous_solution.items():
-                    # Only set values for variables that exist in this year's model
-                    if (from_pc, to_pc, comm) in self.lp_model.allocation_variables:
-                        self.lp_model.allocation_variables[(from_pc, to_pc, comm)].set_value(value)
-                        warm_start_count += 1
-                if warm_start_count > 0:
-                    warm_start_enabled = True
-                    logger.info(
-                        f"operation=warm_start variables_initialized={warm_start_count} "
-                        f"coverage={(warm_start_count / n_vars) * 100:.1f}%"
-                    )
-            elif solver_type in ("ipm", "hipo"):
-                logger.info(
-                    f"operation=warm_start status=skipped reason='{solver_type} solver does not support warm starts'"
-                )
-
-        # tee=True forwards HiGHS's own logs (algorithm banner, iterations, timing)
-        # so you can verify HiPO is actually running. Toggle via env STEELO_HIGHS_LOG.
-        highs_log = os.environ.get("STEELO_HIGHS_LOG", "").lower() in {"1", "true", "yes"}
-        result = solver.solve(self.lp_model, load_solutions=False, warmstart=warm_start_enabled, tee=highs_log)
+        # Toggle Gurobi's console output with STEELO_GUROBI_LOG=1.
+        gurobi_log = os.environ.get("STEELO_GUROBI_LOG", "").lower() in {"1", "true", "yes"}
+        result = solver.solve(self.lp_model, load_solutions=False, tee=gurobi_log)
         elapsed = time.time() - start_time
         logger.info(f"operation=trade_optimization duration_s={elapsed:.3f}")
         self.solution_status = result.solver.status

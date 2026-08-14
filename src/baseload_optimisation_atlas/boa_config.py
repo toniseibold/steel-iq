@@ -94,7 +94,7 @@ class BaseloadPowerConfig:
 
         return cls(
             # Input data created when running the steelo pipeline
-            master_input_path=master_input_dir / "master_input.xlsx",
+            master_input_path=master_input_dir / "master_input_180EURt.xlsx",
             countries_shapefile_path=geo_data_dir / "ne_110m_admin_0_countries" / "ne_110m_admin_0_countries.shp",
             disputed_areas_shapefile_path=geo_data_dir
             / "ne_10m_admin_0_disputed_areas"

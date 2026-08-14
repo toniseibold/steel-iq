@@ -34,6 +34,7 @@ dependencies = [
     "ipython",
     "reverse-geocoder",
     "highspy[extras]>=1.15.1",
+    "gurobipy",
     "numba>=0.61.2",
     # Django Frontend
     "django",
@@ -112,6 +113,7 @@ validate-master-input = "steelo.entrypoints.validate_master_input:main"
 generate-geo-options = "steelo.entrypoints.generate_geo_options:main"
 count-lines-of-code = "steelo.entrypoints.cli:count_lines_of_code"
 run_baseload_power_simulation = "steelo.entrypoints.geo:run_baseload_power_simulation"
+analyse-regional-trade="steelo.adapters.dataprocessing.postprocessing.regional_trade_analysis:main"
 
 [tool.pytest.ini_options]
 addopts = "-ra"
