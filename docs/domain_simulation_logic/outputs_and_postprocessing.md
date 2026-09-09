@@ -93,6 +93,20 @@ Cost-curve filenames follow `cost_curve_{product}_by_{aggregation}_{year}.png` (
 
 Headers are placed first via explicit reordering so downstream consumers can rely on a stable schema.
 
+### Plant fleet age and investment decisions
+
+Each completed run also writes `output/plant_agent_fleet_decisions.csv`, with one row per
+active furnace group and simulation year. It is a compact extract of the post-processed
+data with identifiers, technology, product, capacity (tonnes/year), status, and:
+
+- `commissioning_year` and `plant_age_years` for the age of the original asset;
+- `last_retrofit_year` and `years_since_last_retrofit` for the current investment cycle;
+- `commands` and the normalized `investment_decision` (`retrofit_same_technology`,
+  `retrofit_technology_switch`, `new_capacity_investment`, `closure`, or `none`);
+- `decision_year`, `decision_target_technology`, and `decision_capacity`. For capacity
+  additions, `decision_year` retains the year in which the investment was approved even
+  though the furnace row first becomes visible after construction is complete.
+
 ### Dynamic feedstock / carrier columns
 
 Wide-form columns are emitted for each canonical feedstock or carrier key. Three families share this pattern:
@@ -131,6 +145,27 @@ output/data/steel_iron_prices.csv
 Columns: `year`, `steel_price_usd_per_t`, `iron_price_usd_per_t`, optional `scrap_price_usd_per_t`, optional `iron_weighted_avg_cost_usd_per_t`.
 
 A matching matplotlib chart is also produced.
+
+---
+
+## Regional emissions intensity and price analysis
+
+The regional ex-post analysis combines the post-processed furnace table with the
+global iron and steel market-price series:
+
+```bash
+analyse-regional-emissions-price cluster/results --years 2030 2050
+```
+
+It writes `regional_emissions_price_summary/regional_emissions_and_prices.csv`
+and one four-panel chart per scenario. Regional GHG intensity is calculated as
+the sum of RS-inspired direct and indirect emissions divided by production;
+furnace rows repeated for multiple feedstocks are counted once. Regional unit
+production cost is production-weighted. Because the model exports one global
+market price per product and year rather than regional market prices, each chart
+plots regional production cost against emissions intensity and displays the
+global market price as a dashed reference line. Bubble size represents regional
+production.
 
 ---
 

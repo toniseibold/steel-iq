@@ -208,6 +208,14 @@ def test_commands_column_included_in_output():
             f"Expected CloseFurnaceGroup for plant_002_fg_001 in 2026, got {plant_002_2026_command}"
         )
 
+        fleet_output = data_dir / "plant_agent_fleet_decisions.csv"
+        assert fleet_output.exists()
+        fleet = pd.read_csv(fleet_output)
+        assert {"capacity", "commands", "investment_decision", "decision_year"}.issubset(fleet.columns)
+        switch = fleet[(fleet["year"] == 2025) & (fleet["furnace_group_id"] == "plant_001_fg_001")].iloc[0]
+        assert switch["investment_decision"] == "retrofit_technology_switch"
+        assert switch["decision_target_technology"] == "DRI-EAF"
+
 
 def test_feedstock_rows_with_empty_materials_do_not_crash():
     """Ensure frames with entirely empty materials/cost data are preserved and handled."""

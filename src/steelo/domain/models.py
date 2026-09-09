@@ -1102,6 +1102,7 @@ class FurnaceGroup:
         capacity: Volumes,
         status: str,
         last_renovation_date: date | None,
+        commissioning_year: int | None = None,
         technology: Technology,
         historical_production: dict[Year, Volumes],
         utilization_rate: float,
@@ -1136,6 +1137,15 @@ class FurnaceGroup:
         self.capacity = capacity
         self.status = status
         self.last_renovation_date = last_renovation_date
+        # Keep the original start of the asset separate from the latest retrofit.
+        # Historically ``last_renovation_date`` also held the commissioning date
+        # until the first renovation, which made fleet age impossible to recover
+        # after that renovation took place.
+        self.commissioning_year = (
+            commissioning_year
+            if commissioning_year is not None
+            else (last_renovation_date.year if last_renovation_date is not None else None)
+        )
         self.technology = technology
         self.historical_production = historical_production
         self.utilization_rate = utilization_rate
@@ -3765,6 +3775,7 @@ class Plant:
             furnace_group.bill_of_materials = bom
         furnace_group.utilization_rate = 0.0
         current_year = furnace_group.lifetime.current
+        furnace_group.last_renovation_date = date(current_year + lag, 1, 1)
         furnace_group.lifetime = PointInTime(
             plant_lifetime=plant_lifetime,
             current=current_year,
@@ -4521,12 +4532,17 @@ class Plant:
 
         new_furnace_id = self.get_new_furnance_id_number()
         active_year = current_year + lag
+        # Geospatial opportunities use a large sentinel lag while still only
+        # "considered". Their real commissioning year is assigned once the
+        # opportunity receives a feasible construction schedule.
+        scheduled_commissioning_year = active_year if 1 <= active_year <= 9999 else None
 
         furnace_group = FurnaceGroup(
             furnace_group_id=new_furnace_id,
             capacity=Volumes(capacity),
             status=status,
-            last_renovation_date=date(current_year, 1, 1),
+            last_renovation_date=date(scheduled_commissioning_year or current_year, 1, 1),
+            commissioning_year=scheduled_commissioning_year,
             technology=technology,
             historical_production={},
             utilization_rate=util_rate,

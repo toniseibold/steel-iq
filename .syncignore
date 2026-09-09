@@ -1,0 +1,40 @@
+# Local Git and developer tooling
+/.git/
+/.agents/
+/.codex/
+/.github/
+/.venv/
+/.venv.incompatible.*/
+/.idea/
+/.vscode/
+/.ruff_cache/
+/.pytest_cache/
+/.mypy_cache/
+/.ipynb_checkpoints/
+/.coverage
+/.python-version
+/.env
+/.envrc
+
+# Python, JavaScript, and documentation build products
+**/__pycache__/
+**/*.py[cod]
+/node_modules/
+/dist/
+/docs/_build/
+/src/django/staticfiles/
+
+# Machine-specific model data and generated results
+/.cluster/
+/data
+/data_*
+/checkpoints/
+/output
+/output_*
+/output*/
+/cluster/logs/*
+/cluster/results/*
+*.log
+trade_lp_variables.csv
+*master_input_*.xlsx
+/master_input/

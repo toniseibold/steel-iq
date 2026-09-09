@@ -185,6 +185,7 @@ class FurnaceGroupInDb(BaseModel):
     capacity: Volumes
     status: str
     last_renovation_date: date | None
+    commissioning_year: int | None = None
     technology: TechnologyInDb
     historical_production: dict[Year, Volumes]
     utilization_rate: float
@@ -233,6 +234,7 @@ class FurnaceGroupInDb(BaseModel):
             capacity=self.capacity,
             status=self.status,
             last_renovation_date=self.last_renovation_date,
+            commissioning_year=self.commissioning_year,
             technology=Technology(
                 name=self.technology.name,
                 product=product,
@@ -355,6 +357,10 @@ class FurnaceGroupInDb(BaseModel):
 
         # Create FurnaceGroup using standard to_domain, then replace lifetime
         fg = self.to_domain(plant_lifetime)
+        if meta.get("commissioning_year") is not None:
+            fg.commissioning_year = meta["commissioning_year"]
+        elif meta.get("age_at_reference_year") is not None:
+            fg.commissioning_year = data_ref_year - meta["age_at_reference_year"]
         fg.lifetime = reconstructed_lifetime
 
         # Recalculate dependent properties using existing domain logic
@@ -373,6 +379,7 @@ class FurnaceGroupInDb(BaseModel):
             capacity=furnace_group.capacity,
             status=furnace_group.status,
             last_renovation_date=furnace_group.last_renovation_date,
+            commissioning_year=getattr(furnace_group, "commissioning_year", None),
             technology=TechnologyInDb(**technology_data),
             historical_production=furnace_group.historical_production,
             utilization_rate=furnace_group.utilization_rate,

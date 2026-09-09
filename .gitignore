@@ -61,3 +61,13 @@ docs/trq_cheapest_steel_allocation.md
 steel-iq-production-readiness-fixes.patch
 TRADE_MODULE_ISSUES.md
 experiments/
+
+# Cluster-local runtime state and copied-back results
+/.venv.incompatible.*/
+/.cluster/
+/cluster*
+/cluster/logs/*
+# !/cluster/logs/.gitkeep
+/cluster/results/*
+# !/cluster/results/.gitkeep
+/plots

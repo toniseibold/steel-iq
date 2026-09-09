@@ -330,7 +330,7 @@ class SimulationConfig:
     cluster_hot_metal_techs_by_plant_group: bool = False
 
     # === Plant Agent Module Parameters ===
-    probabilistic_agents: bool = True  # Probabilitstic (mimick human decision-making) vs deterministic approach
+    probabilistic_agents: bool = False  # Probabilitstic (mimick human decision-making) vs deterministic approach
     plant_lifetime: int = 20  # Years
 
     # Statuses of furnace groups

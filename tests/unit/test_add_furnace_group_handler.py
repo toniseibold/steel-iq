@@ -5,6 +5,7 @@ furnace group; previously it was dropped, leaving the FurnaceGroup default (0.2)
 the treasury was debited on the config value.
 """
 
+from datetime import date
 from unittest.mock import MagicMock
 
 from steelo.devdata import get_furnace_group, get_plant
@@ -96,3 +97,5 @@ def test_generate_new_furnace_stores_equity_share():
     )
 
     assert furnace_group.equity_share == 0.3
+    assert furnace_group.commissioning_year == 2029
+    assert furnace_group.last_renovation_date == date(2029, 1, 1)

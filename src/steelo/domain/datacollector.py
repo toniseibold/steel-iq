@@ -4,6 +4,7 @@ from .models import Environment, PlantGroup, Plant
 from steelo.domain.constants import Commodities  # Keep enum as constant
 import pickle
 from collections import defaultdict
+from datetime import date
 from typing import Any, cast
 from pathlib import Path
 import os
@@ -660,6 +661,13 @@ class DataCollector:
                 ):
                     continue
 
+                # A geospatial business opportunity has no meaningful
+                # commissioning year while it is merely "considered". Once it
+                # is operating, its scheduled lifetime start is authoritative.
+                if getattr(fg, "commissioning_year", None) is None and fg.lifetime.start <= year:
+                    fg.commissioning_year = int(fg.lifetime.start)
+                    fg.last_renovation_date = date(fg.commissioning_year, 1, 1)
+
                 bill_of_materials = fg.bill_of_materials
                 materials: dict[str, dict[str, Any]] | None = None
                 energy: dict[str, dict[str, Any]] = {}
@@ -670,11 +678,24 @@ class DataCollector:
                 has_materials = materials is not None
                 record: dict[str, Any] = {
                     "furnace_group_id": fg.furnace_group_id,
+                    "status": fg.status,
                     "technology": fg.technology.name,
                     "chosen_reductant": fg.chosen_reductant,
                     "production": fg.production,
                     "capacity": fg.capacity,
                     "product": fg.technology.product,
+                    "commissioning_year": getattr(fg, "commissioning_year", None),
+                    "plant_age_years": (
+                        int(year) - fg.commissioning_year
+                        if getattr(fg, "commissioning_year", None) is not None
+                        else None
+                    ),
+                    "last_retrofit_year": (
+                        fg.last_renovation_date.year if fg.last_renovation_date is not None else None
+                    ),
+                    "years_since_last_retrofit": (
+                        int(year) - fg.last_renovation_date.year if fg.last_renovation_date is not None else None
+                    ),
                     "unit_fopex": fg.unit_fopex,
                     "unit_debt_repayment": fg.unit_current_debt_repayment,
                     "unit_production_cost": fg.unit_production_cost,
@@ -773,11 +794,24 @@ class DataCollector:
                 else:
                     record = {
                         "furnace_group_id": fg.furnace_group_id,
+                        "status": fg.status,
                         "technology": fg.technology.name,
                         "chosen_reductant": fg.chosen_reductant,
                         "production": fg.production,
                         "capacity": fg.capacity,
                         "product": fg.technology.product,
+                        "commissioning_year": getattr(fg, "commissioning_year", None),
+                        "plant_age_years": (
+                            int(year) - fg.commissioning_year
+                            if getattr(fg, "commissioning_year", None) is not None
+                            else None
+                        ),
+                        "last_retrofit_year": (
+                            fg.last_renovation_date.year if fg.last_renovation_date is not None else None
+                        ),
+                        "years_since_last_retrofit": (
+                            int(year) - fg.last_renovation_date.year if fg.last_renovation_date is not None else None
+                        ),
                         "bill_of_materials": None,
                         "materials": None,
                         "energy": None,

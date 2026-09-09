@@ -56,7 +56,7 @@ def extract_and_process_stored_dataCollection(
     # Track which furnace groups we've seen in previous years to detect new additions
     seen_furnace_groups: set[str] = set()
     # Track AddFurnaceGroup commands by plant_id to match them when furnaces become operational
-    add_furnace_commands: dict[str, str] = {}  # plant_id -> command_name
+    add_furnace_commands: dict[str, tuple[object, int]] = {}  # plant_id -> (command, decision year)
 
     all_furnaces = []
     for year in list(commands.keys()):
@@ -87,6 +87,15 @@ def extract_and_process_stored_dataCollection(
                 "debt_repayment_for_current_year",
                 "furnace_group_profit_and_loss",
             ]
+            for column in (
+                "status",
+                "commissioning_year",
+                "plant_age_years",
+                "last_retrofit_year",
+                "years_since_last_retrofit",
+            ):
+                if column in plant.columns:
+                    fg_cols_to_select.append(column)
             if "unit_debt_repayment" in plant.columns:
                 fg_cols_to_select.append("unit_debt_repayment")
             # Add optional columns if they exist in the DataFrame
@@ -226,6 +235,9 @@ def extract_and_process_stored_dataCollection(
         # Map commands to their string representation (class name)
         # Always add the commands column, even if empty, to ensure consistent DataFrame structure
         commands_dict = {}
+        decision_year_dict: dict[str, int] = {}
+        target_technology_dict: dict[str, str | None] = {}
+        decision_capacity_dict: dict[str, float | None] = {}
         if commands:
             # Get all furnace group IDs that exist in the data for this year
             existing_fg_ids = set(full_furnace_df["furnace_group_id"].unique())
@@ -238,7 +250,7 @@ def extract_and_process_stored_dataCollection(
                     fg_id_str = str(fg_id)
                     if "_new_furnace" in fg_id_str:
                         plant_id = fg_id_str.replace("_new_furnace", "")
-                        add_furnace_commands[plant_id] = cmd_name
+                        add_furnace_commands[plant_id] = (cmd, year)
                         logging.debug(f"Tracked AddFurnaceGroup for plant {plant_id}")
 
             # Process commands for this year
@@ -253,6 +265,12 @@ def extract_and_process_stored_dataCollection(
                 fg_id_str = str(fg_id)
                 if "_new_furnace" not in fg_id_str:
                     commands_dict[fg_id] = cmd_name
+                    decision_year_dict[fg_id] = year
+                    nested_switch = getattr(cmd, "cmd", None)
+                    target_technology_dict[fg_id] = getattr(
+                        nested_switch, "technology_name", getattr(cmd, "technology_name", None)
+                    )
+                    decision_capacity_dict[fg_id] = getattr(nested_switch, "capacity", getattr(cmd, "capacity", None))
 
             # Detect newly operational furnace groups (appearing for the first time)
             new_furnace_groups = existing_fg_ids - seen_furnace_groups
@@ -262,7 +280,11 @@ def extract_and_process_stored_dataCollection(
 
                 # If we have a tracked AddFurnaceGroup command for this plant, assign it
                 if plant_id in add_furnace_commands:
-                    commands_dict[fg_id] = add_furnace_commands[plant_id]
+                    add_command, add_decision_year = add_furnace_commands[plant_id]
+                    commands_dict[fg_id] = "AddFurnaceGroup"
+                    decision_year_dict[fg_id] = add_decision_year
+                    target_technology_dict[fg_id] = getattr(add_command, "technology_name", None)
+                    decision_capacity_dict[fg_id] = getattr(add_command, "capacity", None)
                     logging.info(f"Year {year}: Assigned AddFurnaceGroup to {fg_id}")
 
             # Update seen furnace groups for next iteration
@@ -274,6 +296,20 @@ def extract_and_process_stored_dataCollection(
                 logging.info(f"Year {year}: Sample commands: {list(commands_dict.items())[:5]}")
 
         full_furnace_df["commands"] = full_furnace_df["furnace_group_id"].map(commands_dict)
+        full_furnace_df["decision_year"] = full_furnace_df["furnace_group_id"].map(decision_year_dict)
+        full_furnace_df["decision_target_technology"] = full_furnace_df["furnace_group_id"].map(target_technology_dict)
+        full_furnace_df["decision_capacity"] = full_furnace_df["furnace_group_id"].map(decision_capacity_dict)
+
+        def investment_type(command_name: str | None) -> str:
+            return {
+                "RenovateFurnaceGroup": "retrofit_same_technology",
+                "ChangeFurnaceGroupTechnology": "retrofit_technology_switch",
+                "ChangeFurnaceGroupStatusToSwitchingTechnology": "retrofit_technology_switch",
+                "AddFurnaceGroup": "new_capacity_investment",
+                "CloseFurnaceGroup": "closure",
+            }.get(command_name, "none")
+
+        full_furnace_df["investment_decision"] = full_furnace_df["commands"].map(investment_type)
         all_furnaces.append(full_furnace_df)
 
     # Combine all furnaces data
@@ -352,6 +388,32 @@ def extract_and_process_stored_dataCollection(
 
     if store:
         final_df.to_csv(output_path, index=False)
+        fleet_columns = [
+            "year",
+            "region",
+            "country",
+            "iso3",
+            "plant_group_id",
+            "plant_id",
+            "furnace_group_id",
+            "status",
+            "technology",
+            "product",
+            "capacity",
+            "commissioning_year",
+            "plant_age_years",
+            "last_retrofit_year",
+            "years_since_last_retrofit",
+            "commands",
+            "investment_decision",
+            "decision_year",
+            "decision_target_technology",
+            "decision_capacity",
+        ]
+        available_fleet_columns = [column for column in fleet_columns if column in final_df.columns]
+        final_df[available_fleet_columns].drop_duplicates().to_csv(
+            output_path.parent / "plant_agent_fleet_decisions.csv", index=False
+        )
         return str(output_path)
     else:
         return final_df
