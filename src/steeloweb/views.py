@@ -744,7 +744,9 @@ def create_modelrun(request):
                 "probability_of_announcement": float(form.cleaned_data.get("probability_of_announcement") or 0.7),
                 "probability_of_construction": float(form.cleaned_data.get("probability_of_construction") or 0.9),
                 "top_n_loctechs_as_business_op": form.cleaned_data.get("top_n_loctechs_as_business_op", 15),
-                "priority_pct": int(form.cleaned_data.get("priority_pct") or 5),
+                "opportunity_pool_depth": int(form.cleaned_data.get("opportunity_pool_depth") or 3),
+                "pick_priority_sites_share": float(form.cleaned_data.get("pick_priority_sites_share") or 0.05),
+                "calculate_npv_sites_share": float(form.cleaned_data.get("calculate_npv_sites_share") or 0.1),
                 # Plant capacity parameters (convert Mt to t)
                 "expanded_capacity": float(form.cleaned_data.get("expanded_capacity") or 2.5) * 1000000,
                 "capacity_limit_iron": float(form.cleaned_data.get("capacity_limit_iron") or 100) * 1000000,
@@ -764,9 +766,7 @@ def create_modelrun(request):
                 "green_steel_emissions_limit": 0.4,  # Hardcoded - no longer user-configurable
                 "include_tariffs": form.cleaned_data.get("include_tariffs", True),
                 "enable_furnace_group_clustering": form.cleaned_data.get("enable_furnace_group_clustering", False),
-                "cluster_hot_metal_techs_by_plant_group": form.cleaned_data.get(
-                    "cluster_hot_metal_techs_by_plant_group", False
-                ),
+                "geographical_clustering_scope": form.cleaned_data.get("geographical_clustering_scope", "iso3"),
                 "output_file": output_file,
                 # Add new demand and circularity fields
                 "total_steel_demand_scenario": form.cleaned_data.get(

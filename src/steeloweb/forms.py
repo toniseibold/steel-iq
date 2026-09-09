@@ -359,14 +359,44 @@ class ModelRunCreateForm(forms.ModelForm):
         widget=forms.NumberInput(attrs={"class": "form-control field-connected"}),
     )
 
-    priority_pct = forms.IntegerField(
-        label="Percentage of considered opportunities",
-        initial=5,
+    opportunity_pool_depth = forms.IntegerField(
+        label="Opportunity pool depth",
+        initial=3,
         min_value=1,
-        max_value=100,
+        max_value=10,
         required=False,
-        help_text="Percentage of global grid points selected as priority locations for business opportunities",
+        help_text=(
+            "Draw eligibility: global top (depth × top N) by NPV plus each technology's best 'depth' sites, "
+            "so every technology stays drawable"
+        ),
         widget=forms.NumberInput(attrs={"class": "form-control field-connected"}),
+    )
+
+    pick_priority_sites_share = forms.DecimalField(
+        label="Priority sites fraction",
+        initial=0.05,
+        min_value=0.001,
+        max_value=1.0,
+        max_digits=4,
+        decimal_places=3,
+        required=False,
+        help_text="Fraction (0.0-1.0) of global grid points selected as priority locations for business opportunities",
+        widget=forms.NumberInput(attrs={"class": "form-control field-connected", "step": "0.001"}),
+    )
+
+    calculate_npv_sites_share = forms.DecimalField(
+        label="NPV sample fraction",
+        initial=0.1,
+        min_value=0.0,
+        max_value=1.0,
+        max_digits=3,
+        decimal_places=2,
+        required=False,
+        help_text=(
+            "Fraction (0.0-1.0) of priority locations sampled each year for full NPV evaluation; "
+            "the 0.1 default only saves computational time"
+        ),
+        widget=forms.NumberInput(attrs={"class": "form-control field-connected", "step": "0.01"}),
     )
 
     # Plant capacity parameters
@@ -443,15 +473,21 @@ class ModelRunCreateForm(forms.ModelForm):
         widget=forms.CheckboxInput(attrs={"class": "form-check-input field-connected"}),
     )
 
-    cluster_hot_metal_techs_by_plant_group = forms.BooleanField(
-        label="Cluster hot metal technologies by plant group",
-        initial=False,
+    geographical_clustering_scope = forms.ChoiceField(
+        label="Geographical clustering scope",
+        choices=[
+            ("iso3", "Country (ISO3)"),
+            ("plant_group", "Plant group (corporate)"),
+            ("plant", "Individual plant"),
+        ],
+        initial="iso3",
         required=False,
         help_text=(
-            "Cluster furnace groups consuming/producing closely-allocated commodities by plant group "
-            "instead of country, keeping cold/hot commodity substitution local (requires clustering on)"
+            "Geographical scope for clustering furnace groups consuming/producing closely-allocated commodities. "
+            "Determines how fine-grained the clustering is while keeping cold/hot commodity substitution local. "
+            "(requires clustering on)"
         ),
-        widget=forms.CheckboxInput(attrs={"class": "form-check-input field-connected"}),
+        widget=forms.Select(attrs={"class": "form-select field-connected"}),
     )
 
     # Demand and Circularity fields
@@ -776,7 +812,9 @@ class ModelRunCreateForm(forms.ModelForm):
             "probability_of_announcement",
             "probability_of_construction",
             "top_n_loctechs_as_business_op",
-            "priority_pct",
+            "opportunity_pool_depth",
+            "pick_priority_sites_share",
+            "calculate_npv_sites_share",
             "expanded_capacity",
             "capacity_limit_iron",
             "capacity_limit_steel",
@@ -787,7 +825,7 @@ class ModelRunCreateForm(forms.ModelForm):
             "use_iron_ore_premiums",
             "include_tariffs",
             "enable_furnace_group_clustering",
-            "cluster_hot_metal_techs_by_plant_group",
+            "geographical_clustering_scope",
             "chosen_grid_emissions_scenario",
             # Demand and Circularity
             "total_steel_demand_scenario",
@@ -842,11 +880,11 @@ class ModelRunCreateForm(forms.ModelForm):
         if cleaned_data.get("random_seed") is None:
             cleaned_data["random_seed"] = secrets.randbelow(2**31) if randomise else 42
 
-        # cluster_hot_metal_techs_by_plant_group is a no-op unless
-        # enable_furnace_group_clustering is also on; coerce to False so the
+        # geographical_clustering_scope is a no-op unless
+        # enable_furnace_group_clustering is also on; coerce to iso3 (no-op) so the
         # stored config reflects actual runtime behaviour.
         if not cleaned_data.get("enable_furnace_group_clustering"):
-            cleaned_data["cluster_hot_metal_techs_by_plant_group"] = False
+            cleaned_data["geographical_clustering_scope"] = "iso3"
 
         # Set default values for fields that are not required but need values
         if not cleaned_data.get("scrap_generation_scenario"):
