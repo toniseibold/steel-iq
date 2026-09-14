@@ -381,7 +381,7 @@ def add_furnace_groups_as_process_centers(
         config: Simulation configuration with:
             - active_statuses: List of furnace statuses to include
             - capacity_limit: Safety factor to scale capacities (typically 0.95)
-            - soft_minimum_capacity_share: Target minimum utilization
+            - soft_minimum_capacity_percentage: Target minimum utilization
             - primary_products: List of primary products for BOM creation
         furnace_groups_override: Optional list of MetaFurnaceGroup objects to use instead
             of extracting from repository. When provided, uses clustered furnace groups.
@@ -420,7 +420,7 @@ def add_furnace_groups_as_process_centers(
                 capacity=config.capacity_limit * meta_fg.total_capacity,
                 location=meta_fg.location,  # This is the capacity-weighted centroid
                 production_cost=meta_fg.weighted_avg_carbon_cost,
-                soft_minimum_capacity=config.soft_minimum_capacity_share,
+                soft_minimum_capacity=config.soft_minimum_capacity_percentage,
                 energy_costs_per_input=build_energy_costs_per_input_for_meta_fg(meta_fg),
             )
             logger.info(
@@ -449,7 +449,7 @@ def add_furnace_groups_as_process_centers(
                     capacity=config.capacity_limit * furnace_group.capacity,
                     location=plant.location,
                     production_cost=furnace_group.carbon_cost_per_unit,
-                    soft_minimum_capacity=config.soft_minimum_capacity_share,
+                    soft_minimum_capacity=config.soft_minimum_capacity_percentage,
                     energy_costs_per_input=build_energy_costs_per_input(furnace_group),
                 )
                 process_centers.append(process_center)
@@ -755,7 +755,7 @@ def fix_to_zero_allocations_where_distance_doesnt_match_commodity(
     Args:
         trade_lp: The trade LP model with allocation variables to constrain
         config: Simulation configuration with:
-            - hot_metal_radius: Maximum distance for hot metal transport (km)
+            - hot_metal_radius: Maximum distance for hot metal transport (km, typically ~100)
             - closely_allocated_products: Products limited to short distances (e.g., ["hot_metal"])
             - distantly_allocated_products: Products requiring longer distances (e.g., ["pig_iron", "steel"])
             - enable_furnace_group_clustering: Whether clustering is enabled (optional)
@@ -771,8 +771,8 @@ def fix_to_zero_allocations_where_distance_doesnt_match_commodity(
 
     if enable_clustering:
         # NEW BEHAVIOR: Allow both hot and cold commodities with geographic constraints
-        # Hot commodities are restricted to intra-country allocations (or intra-plant-group/intra-plant
-        # when geographical_clustering_scope is plant_group or plant, which keeps flows physically
+        # Hot commodities are restricted to intra-country allocations (or intra-plant-group
+        # when cluster_hot_metal_techs_by_plant_group is on, which keeps flows physically
         # local).
         # Cold commodities can go anywhere.
 
@@ -782,11 +782,10 @@ def fix_to_zero_allocations_where_distance_doesnt_match_commodity(
             if pc.location and pc.location.iso3:
                 pc_name_to_iso3[pc.name] = pc.location.iso3
 
-        # When clustering scope is plant_group or plant, build pc_name → scope_id for meta-FGs
+        # When plant-group clustering is on, build pc_name → plant_group_id for meta-FGs
         # so we can tighten the hot-commodity rule beyond iso3.
         pc_name_to_plant_group: dict[str, str] = {}
-        clustering_scope = getattr(config, "geographical_clustering_scope", "iso3")
-        use_plant_group_rule = clustering_scope in ("plant_group", "plant")
+        use_plant_group_rule = getattr(config, "cluster_hot_metal_techs_by_plant_group", False)
         if use_plant_group_rule:
             meta_fgs = getattr(env, "meta_furnace_groups", None) if env is not None else None
             if meta_fgs:
@@ -823,8 +822,9 @@ def fix_to_zero_allocations_where_distance_doesnt_match_commodity(
 
         logger.info(
             f"[LP HOT-METAL] Fixed to zero: {blocked_cross_country} cross-country, "
-            f"{blocked_cross_plant_group} cross-scope, {blocked_missing_iso3} missing-iso3 "
-            f"(clustering_scope={clustering_scope}, scope-keyed PCs={len(pc_name_to_plant_group)})"
+            f"{blocked_cross_plant_group} cross-plant-group, {blocked_missing_iso3} missing-iso3 "
+            f"(plant_group rule={'on' if use_plant_group_rule else 'off'}, "
+            f"plant-group-keyed PCs={len(pc_name_to_plant_group)})"
         )
 
     else:
@@ -1008,7 +1008,7 @@ def set_up_steel_trade_lp(
             - primary_products: List of commodities (e.g., ["steel", "iron"])
             - lp_epsilon: LP solver tolerance (e.g., 1e-3)
             - capacity_limit: Production capacity safety factor (typically 0.95)
-            - soft_minimum_capacity_share: Target minimum utilization
+            - soft_minimum_capacity_percentage: Target minimum utilization
             - active_statuses: Furnace statuses to include (e.g., ["operating"])
             - hot_metal_radius: Max distance for hot metal (km)
             - closely_allocated_products: Short-distance products

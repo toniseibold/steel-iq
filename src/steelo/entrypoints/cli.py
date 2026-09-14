@@ -18,7 +18,6 @@ from rich.console import Console
 from rich.table import Table
 
 from ..domain import Year
-from ..domain.constants import RANDOM_SEED_DEFAULT
 
 from ..simulation import SimulationConfig
 from ..bootstrap import bootstrap_simulation
@@ -67,33 +66,6 @@ def run_full_simulation() -> str:
         type=str,
         default="Steel_Demand_Chris Bataille",
         help="Sheet name in the demand excel file (default: 'Steel_Demand_Chris Bataille')",
-    )
-    parser.add_argument(
-        "--demand-scenario",
-        type=str,
-        default="BAU",
-        help="Scenario name in the 'Demand and scrap availability' sheet used for steel demand (default: BAU)",
-    )
-    parser.add_argument(
-        "--scrap-scenario",
-        type=str,
-        default=None,
-        help="Scenario name in the same sheet used for scrap availability (default: same as --demand-scenario)",
-    )
-    parser.add_argument(
-        "--grid-emissions-scenario",
-        type=str,
-        default="Business As Usual",
-        help=(
-            "Grid emissivity projection applied at run time, named as in the 'Power grid emissivity' sheet "
-            "without its 'projection_' prefix (default: 'Business As Usual'; alternative: 'Net Zero')"
-        ),
-    )
-    parser.add_argument(
-        "--run-name",
-        type=str,
-        default=None,
-        help="Human-readable run name shown in the interactive plot titles (default: the sim_<timestamp> dir name)",
     )
     parser.add_argument(
         "--location-csv",
@@ -147,16 +119,24 @@ def run_full_simulation() -> str:
         help="Enable furnace group clustering to reduce LP complexity",
     )
 
+    def _str2bool(v: str) -> bool:
+        if v.lower() in ("true", "t", "yes", "y", "1"):
+            return True
+        if v.lower() in ("false", "f", "no", "n", "0"):
+            return False
+        raise argparse.ArgumentTypeError(f"expected a boolean value, got {v!r}")
+
     parser.add_argument(
-        "--clustering-scope",
-        type=str,
-        choices=["iso3", "plant_group", "plant"],
-        default="iso3",
+        "--cluster-hot-metal-by-plant-group",
+        type=_str2bool,
+        nargs="?",
+        const=True,
+        default=False,
         help=(
-            "When clustering is enabled, geographical scope for clustering hot-metal-affected techs. "
-            "'iso3' (default): cluster by country. 'plant_group': cluster by corporate group. "
-            "'plant': cluster by individual plant. "
-            "Only affects FGs with hot_metal/dri_*/liquid_iron feedstocks or outputs."
+            "When clustering is enabled, cluster hot-metal-affected techs "
+            "(those whose feedstocks or outputs include hot_metal/dri_*/liquid_iron) "
+            "by plant_group_id instead of iso3. Accepts bare flag, =True, or =False. "
+            "No effect without --enable-clustering."
         ),
     )
     parser.add_argument(
@@ -169,15 +149,6 @@ def run_full_simulation() -> str:
         type=float,
         default=0.8,
         help="Ratio of steel price for iron floor when pegging is enabled (default: 0.8 = 80%%)",
-    )
-    parser.add_argument(
-        "--random-seed",
-        type=int,
-        default=RANDOM_SEED_DEFAULT,
-        help=(
-            "Seed for the run-time RNGs shared by the plant agent, geospatial and trade LP modules "
-            "(default: %(default)s); data preparation keeps its own fixed seed"
-        ),
     )
 
     # Parse the command-line arguments
@@ -224,15 +195,6 @@ def run_full_simulation() -> str:
         }
         log_level = log_levels[args.log_level]
 
-        # Scrap availability follows the demand scenario unless picked separately
-        demand_scenario = args.demand_scenario
-        scrap_scenario = args.scrap_scenario or args.demand_scenario
-        grid_emissions_scenario = args.grid_emissions_scenario
-        console.print(
-            f"[blue]Demand scenario:[/blue] {demand_scenario}  [blue]Scrap scenario:[/blue] {scrap_scenario}  "
-            f"[blue]Grid emissions scenario:[/blue] {grid_emissions_scenario}"
-        )
-
         # Prepare data with caching
         from ..data import DataPreparationService
 
@@ -267,9 +229,7 @@ def run_full_simulation() -> str:
         # Check if we can use cached data directly
         cached_data_dir = None
         if not args.no_cache and not args.force_refresh:
-            cached_data_dir = cache_manager.get_cached_preparation(
-                master_excel_path, demand_scenario=demand_scenario, scrap_scenario=scrap_scenario
-            )
+            cached_data_dir = cache_manager.get_cached_preparation(master_excel_path)
             if cached_data_dir:
                 # cached_data_dir already points to the data directory
                 console.print(f"[blue]Using cached preparation from:[/blue] {cached_data_dir}")
@@ -294,12 +254,7 @@ def run_full_simulation() -> str:
                 "output_dir": output_dir,
                 "master_excel_path": master_excel_path,
                 "demand_sheet_name": args.demand_sheet,
-                "chosen_demand_scenario": demand_scenario,
-                "chosen_scrap_scenario": scrap_scenario,
-                "chosen_grid_emissions_scenario": grid_emissions_scenario,
-                "run_name": args.run_name,
                 "log_level": log_level,
-                "random_seed": args.random_seed,
             }
 
             # Add custom baseload_power_sim_dir if provided
@@ -317,9 +272,9 @@ def run_full_simulation() -> str:
             if args.enable_clustering:
                 config.enable_furnace_group_clustering = True
                 console.print("[green]Furnace group clustering enabled[/green]")
-            if args.clustering_scope != "iso3":
-                config.geographical_clustering_scope = args.clustering_scope
-                console.print(f"[green]Hot-metal-affected techs will cluster by {args.clustering_scope}[/green]")
+            if args.cluster_hot_metal_by_plant_group:
+                config.cluster_hot_metal_techs_by_plant_group = True
+                console.print("[green]Hot-metal-affected techs will cluster by plant_group[/green]")
 
             # Override iron price pegging settings from command line
             if args.peg_iron_to_steel_price:
@@ -339,8 +294,6 @@ def run_full_simulation() -> str:
                 "cache_used": True,
                 "master_excel": str(master_excel_path),
                 "cached_from": str(cached_data_dir),
-                "demand_scenario": demand_scenario,
-                "scrap_scenario": scrap_scenario,
             }
             (output_dir / "preparation_metadata.json").write_text(json.dumps(prep_metadata, indent=2))
 
@@ -360,8 +313,6 @@ def run_full_simulation() -> str:
                     master_excel_path=master_excel_path,
                     force_refresh=args.force_refresh,
                     verbose=True,
-                    demand_scenario=demand_scenario,
-                    scrap_scenario=scrap_scenario,
                 )
 
                 actual_data_dir = prep_dir
@@ -381,12 +332,7 @@ def run_full_simulation() -> str:
                     "output_dir": output_dir,
                     "master_excel_path": master_excel_path,
                     "demand_sheet_name": args.demand_sheet,
-                    "chosen_demand_scenario": demand_scenario,
-                    "chosen_scrap_scenario": scrap_scenario,
-                    "chosen_grid_emissions_scenario": grid_emissions_scenario,
-                    "run_name": args.run_name,
                     "log_level": log_level,
-                    "random_seed": args.random_seed,
                 }
 
                 # Add custom baseload_power_sim_dir if provided
@@ -406,9 +352,9 @@ def run_full_simulation() -> str:
                 if args.enable_clustering:
                     config.enable_furnace_group_clustering = True
                     console.print("[green]Furnace group clustering enabled[/green]")
-                if args.clustering_scope != "iso3":
-                    config.geographical_clustering_scope = args.clustering_scope
-                    console.print(f"[green]Hot-metal-affected techs will cluster by {args.clustering_scope}[/green]")
+                if args.cluster_hot_metal_by_plant_group:
+                    config.cluster_hot_metal_techs_by_plant_group = True
+                    console.print("[green]Hot-metal-affected techs will cluster by plant_group[/green]")
 
                 # Override iron price pegging settings from command line
                 if args.peg_iron_to_steel_price:
@@ -430,8 +376,6 @@ def run_full_simulation() -> str:
                     "preparation_duration": prep_result.total_duration,
                     "files_prepared": len(prep_result.files),
                     "temp_prep_dir": str(prep_dir),
-                    "demand_scenario": demand_scenario,
-                    "scrap_scenario": scrap_scenario,
                 }
                 (output_dir / "preparation_metadata.json").write_text(json.dumps(prep_metadata, indent=2))
 

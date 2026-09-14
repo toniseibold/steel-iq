@@ -878,8 +878,6 @@ def plot_detailed_trade_map(
         "sinter_mid": [160, 82, 45],  # sienna
         "sinter_high": [210, 105, 30],  # chocolate
         "liquid steel": [0, 200, 255],  # light blue
-        "liquid_iron": [255, 140, 0],  # dark orange
-        "electrolytic_iron": [123, 104, 238],  # medium slate blue
         "hbi_low": [102, 0, 204],  # indigo
         "hbi_mid": [153, 51, 255],  # violet
         "hbi_high": [204, 153, 255],  # light purple
@@ -1431,12 +1429,6 @@ def plot_detailed_trade_map(
         }};
 
         let deckgl;
-
-        // This map never uses Mapbox-hosted styles/tiles (basemap comes from CARTO's
-        // free CDN), so disable Mapbox GL JS's access-token requirement rather than
-        // needing a real Mapbox account/key.
-        mapboxgl.accessToken = 'not-needed';
-        mapboxgl.config.REQUIRE_ACCESS_TOKEN = false;
 
         // Make functions available globally for onclick handlers
         window.toggleCommodity = function(commodity) {{

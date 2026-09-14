@@ -708,7 +708,7 @@ class ModelRun(models.Model):
             # Core simulation parameters (have defaults)
             "active_statuses",
             "capacity_limit",
-            "soft_minimum_capacity_share",
+            "soft_minimum_capacity_percentage",
             "hot_metal_radius",
             "random_seed",
             "construction_time",
@@ -717,14 +717,12 @@ class ModelRun(models.Model):
             "probability_of_construction",
             "probability_of_announcement",
             "top_n_loctechs_as_business_op",
-            "opportunity_pool_depth",
-            "calculate_npv_sites_share",
             # Plant capacity parameters
             "expanded_capacity",
             "capacity_limit_iron",
             "capacity_limit_steel",
             "new_capacity_share_from_new_plants",
-            "pick_priority_sites_share",
+            "priority_pct",
             "hydrogen_ceiling_percentile",
             "intraregional_trade_allowed",
             "long_dist_pipeline_transport_cost",
@@ -740,7 +738,7 @@ class ModelRun(models.Model):
             "use_iron_ore_premiums",
             "green_steel_emissions_limit",
             "enable_furnace_group_clustering",
-            "geographical_clustering_scope",
+            "cluster_hot_metal_techs_by_plant_group",
             # Feature flags
             "include_infrastructure_cost",
             "include_transport_cost",
@@ -931,7 +929,7 @@ class ModelRun(models.Model):
                 "include_transport_cost",
                 "include_lulc_cost",
                 "transportation_cost_per_km_per_ton",
-                "pick_priority_sites_share",
+                "priority_pct",
             ]
             # Only include geo parameters that are not None to avoid overriding defaults
             # Apply defensive type casting for specific fields
@@ -951,8 +949,8 @@ class ModelRun(models.Model):
                         val = float(_pick(filtered_config, k, 20.0))
                     elif k == "long_dist_pipeline_transport_cost":
                         val = float(_pick(filtered_config, k, 1.0))
-                    elif k == "pick_priority_sites_share":
-                        val = float(_pick(filtered_config, k, 0.05))
+                    elif k == "priority_pct":
+                        val = int(_pick(filtered_config, k, 5))
                     elif k == "transportation_cost_per_km_per_ton":
                         val = {route: float(v) for route, v in filtered_config[k].items() if v not in (None, "")}
                     geo_config_data[k] = val
@@ -995,7 +993,7 @@ class ModelRun(models.Model):
                 "include_transport_cost",
                 "include_lulc_cost",
                 "transportation_cost_per_km_per_ton",
-                "pick_priority_sites_share",
+                "priority_pct",
             ]
             # Only include geo parameters that are not None to avoid overriding defaults
             # Apply defensive type casting for specific fields
@@ -1015,8 +1013,8 @@ class ModelRun(models.Model):
                         val = float(_pick(filtered_config, k, 20.0))
                     elif k == "long_dist_pipeline_transport_cost":
                         val = float(_pick(filtered_config, k, 1.0))
-                    elif k == "pick_priority_sites_share":
-                        val = float(_pick(filtered_config, k, 0.05))
+                    elif k == "priority_pct":
+                        val = int(_pick(filtered_config, k, 5))
                     elif k == "transportation_cost_per_km_per_ton":
                         val = {route: float(v) for route, v in filtered_config[k].items() if v not in (None, "")}
                     geo_config_data[k] = val

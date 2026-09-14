@@ -226,13 +226,10 @@ def recreate_demand_center_data(
     demand_sheet_name: str,
     gravity_distances_path: Path | None = None,
     location_csv: Path | None = None,
-    *,
-    demand_scenario: str,
 ) -> DemandCenterJsonRepository:
     """
     Recreate the JSON sample demand center data from the current CSV file.
 
-    Only the rows of `demand_scenario` (the sheet's "Scenario" column) are read.
     Note: gravity_distances_path and location_csv must be provided by the caller.
     """
     if not gravity_distances_path:
@@ -245,7 +242,6 @@ def recreate_demand_center_data(
         demand_excel_path=demand_excel_path,
         demand_sheet_name=demand_sheet_name,
         location_csv=location_csv,
-        demand_scenario=demand_scenario,
     )
 
     write_repository = DemandCenterJsonRepository(json_path)
@@ -262,13 +258,10 @@ def recreate_mines_and_scrap_as_suppliers_data(
     mines_sheet_name: str = "Iron ore mines",
     location_csv: Path | None = None,
     gravity_distances_pkl_path: Path | None = None,
-    *,
-    scrap_scenario: str,
 ) -> SupplierJsonRepository:
     """
     Recreate the JSON sample mines/scrap suppliers data from the current Excel file.
 
-    Scrap suppliers are read for `scrap_scenario` (the sheet's "Scenario" column); mines have no scenario.
     Note: location_csv is now a required parameter.
     """
     if location_csv is None:
@@ -284,7 +277,6 @@ def recreate_mines_and_scrap_as_suppliers_data(
         scrap_sheet_name=scrap_sheet_name,
         location_csv=location_path,
         gravity_distances_pkl_path=gravity_path,
-        scrap_scenario=scrap_scenario,
     )
     console.print(f"[blue]  Read {len(scrap_suppliers)} scrap suppliers[/blue]")
 
@@ -464,7 +456,7 @@ def recreate_geo_hierarchy_data(
     geo_hierarchy_json_path: Path,
     admin1_shapefile_path: Path,
     declared_iso2: Iterable[str] = ("CN",),
-) -> list[dict]:
+) -> Path:
     """Recreate geo_hierarchy.json from the Natural Earth admin-1 shapefile.
 
     Args:
@@ -473,8 +465,7 @@ def recreate_geo_hierarchy_data(
         declared_iso2: Countries to populate (China only for now).
 
     Returns:
-        The geo_hierarchy rows that were written, for in-memory use by the caller
-        (e.g. handing the valid geo-keys to the plants readers without re-reading the file).
+        The path the table was written to.
     """
     import geopandas as gpd
 
@@ -485,7 +476,7 @@ def recreate_geo_hierarchy_data(
 
     geo_hierarchy_json_path.write_text(json.dumps(rows, indent=2, ensure_ascii=False))
     console.print(f"[green]Wrote {len(rows)} geo_hierarchy rows to[/green]: {geo_hierarchy_json_path}")
-    return rows
+    return geo_hierarchy_json_path
 
 
 GEO_OPTIONS_COLUMNS = [

@@ -191,7 +191,6 @@ class ExcelValidator:
                             demand_excel_path=file_path,
                             demand_sheet_name="Sheet1",
                             location_csv=self.location_csv_path,
-                            demand_scenario="BAU",
                         )
                         result.data = demand_centers
                     else:
@@ -218,11 +217,7 @@ class ExcelValidator:
             if self.location_csv_path:
                 if is_scrap:
                     suppliers = excel_reader.read_scrap_as_suppliers(
-                        str(file_path),
-                        "Sheet1",
-                        str(self.location_csv_path),
-                        gravity_distances_pkl_path=None,
-                        scrap_scenario="BAU",
+                        str(file_path), "Sheet1", str(self.location_csv_path), gravity_distances_pkl_path=None
                     )
                 else:
                     suppliers = excel_reader.read_mines_as_suppliers(

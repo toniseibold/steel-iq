@@ -17,11 +17,6 @@ LP_TOLERANCE = 1e-4  # Linear programming solver tolerance, values below are tre
 # ===== Hardcoded Parameters =====
 MINIMUM_UTILIZATION_RATE_FOR_COST_CURVE = 0.3
 MINIMUM_PRODUCTION_VOLUME_FOR_COST_CURVE = 50e3  # tpa; minimum production volume for a plant to have a cost curve
-INITIAL_SCRAP_PRODUCTION_COST = 333.0  # USD/t; placeholder scrap production cost written at data
-# preparation (called before the SimulationConfig is created) and re-applied at bootstrap from
-# SimulationConfig.initial_scrap_production_cost. The annual repricing in handlers.py overwrites it
-# from the second simulation year onward (falling back to the same configured value when it has no
-# cost data to price from), so only the first year is guaranteed to trade scrap at this value.
 
 # ===== Unit Conversion Factors =====
 GJ_TO_KWH = 1e3 / 3.6  # 1 GJ = 1e3/3e6 kWh and 1/3.6 MWh
@@ -50,9 +45,6 @@ PLANT_LIFETIME = 20  # years; default lifetime of a plant (used for data prepara
 # called before the SimulationConfig is created. For the actual simulation, the lifetime in the
 # SimulationConfig is used. The data preparation lifetime is only used to determine the renovation
 # cycle position of existing plants.
-RANDOM_SEED_DEFAULT = 42  # single seed shared by PAM, geospatial, trade LP and data preparation
-CONSTRUCTION_TIME_DEFAULT = 4  # years from the start of construction to operation
-ANNOUNCEMENT_TIME = 1  # max years between a unit's announcement and the start of its construction
 MIN_CAPACITY_FOR_DISTANCE_CALCULATION = 1 * MT_TO_T  # t; minimum capacity for plants to be considered
 # in the distance to closest location calculation in the geospatial analysis. This is to speed up the
 # calculation - locations with a capacity below this threshold are ignored.
@@ -96,19 +88,9 @@ DISTANTLY_ALLOCATED_PRODUCTS = [
     Commodities.PIG_IRON.value,
     Commodities.ELECTROLYTIC_IRON.value,
 ]
-IRON_PRODUCTS = [
-    "iron",
-    "hot_metal",
-    "pig_iron",
-    "dri_low",
-    "dri_mid",
-    "dri_high",
-    "hbi_low",
-    "hbi_mid",
-    "hbi_high",
-    "liquid_iron",
-    "electrolytic_iron",
-]
+IRON_PRODUCTS = ["iron", "hot_metal", "pig_iron", "dri_low", "dri_mid", "dri_high", "hbi_low", "hbi_mid", "hbi_high"]
+# Note: CLOSElY_ALLOCATED_PRODUCTS with lowercase 'l' is an alias for CLOSELY_ALLOCATED_PRODUCTS
+CLOSElY_ALLOCATED_PRODUCTS = CLOSELY_ALLOCATED_PRODUCTS
 
 
 # Sub-country demand and scrap share per center for major steel consuming countries

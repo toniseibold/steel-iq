@@ -282,10 +282,7 @@ def update_cost_curve(_event: events.Event, uow: UnitOfWork, env: Environment):
     with uow:
         env.update_cost_curve(
             world_furnace_groups=[
-                fg
-                for p in uow.plants.list()
-                for fg in p.furnace_groups
-                if (fg.status.lower() in env.config.active_statuses)
+                fg for p in uow.plants.list() for fg in p.furnace_groups if (fg.status in env.config.active_statuses)
             ],
             lag=0,
         )
@@ -306,12 +303,7 @@ def update_furnace_utilization_rates(event: events.SteelAllocationsCalculated, u
         raise ValueError("SimulationConfig is required for update_furnace_utilization_rates")
 
     with uow:
-        fgs = [
-            fg
-            for p in uow.plants.list()
-            for fg in p.furnace_groups
-            if (fg.status.lower() in env.config.active_statuses)
-        ]
+        fgs = [fg for p in uow.plants.list() for fg in p.furnace_groups if (fg.status in env.config.active_statuses)]
         active_bof_count = sum(1 for fg in fgs if fg.technology.name.upper() == "BOF")
 
         tmpc = TM_PAM_connector(
@@ -350,6 +342,7 @@ def update_furnace_utilization_rates(event: events.SteelAllocationsCalculated, u
                     f"[BOM-CHECK] Year {env.year}: corrected utilization for {corrected} supply-constrained FG(s)"
                 )
         tmpc.update_furnace_group_emissions(fgs)
+        env.allocation_and_transportation_costs = tmpc.extract_transportation_costs(fgs)
 
         # Store trade allocations for data collection
         env.trade_allocations = trade_allocations
@@ -366,7 +359,7 @@ def update_furnace_utilization_rates(event: events.SteelAllocationsCalculated, u
         iron_demand_from_production = 0.0
         for plant in uow.plants.list():
             for fg in plant.furnace_groups:
-                if fg.status.lower() in env.config.active_statuses and fg.technology.product.lower() == "iron":
+                if fg.status in env.config.active_statuses and fg.technology.product.lower() == "iron":
                     iron_demand_from_production += fg.production
 
         print(f"Iron demand based on production in year {env.year} is {iron_demand_from_production * T_TO_KT:,.0f} kt")
@@ -578,9 +571,9 @@ def finalise_iteration(
         for supplier in uow.repository.suppliers.list():
             if supplier.commodity == "scrap":
                 pricing_source = "default"
-                source_cost = env.config.initial_scrap_production_cost  # Default when no cost data exists
+                source_cost = 200.0  # Default scrap cost
                 sample_size = getattr(env, "_diag_bof_sample_count", None)
-                # Use BOF hot_metal cost if available, otherwise use the configured default
+                # Use BOF hot_metal cost if available, otherwise use hardcoded default
                 if "BOF" in env.avg_boms and "hot_metal" in env.avg_boms["BOF"]:
                     source_cost = env.avg_boms["BOF"]["hot_metal"]["unit_cost"] * 0.95
                     pricing_source = "avg_bom"
@@ -592,7 +585,7 @@ def finalise_iteration(
                         pricing_source = "fallback"
                     else:
                         # Ultimate fallback if no cost data available
-                        source_cost = env.config.initial_scrap_production_cost
+                        source_cost = 200.0
                         pricing_source = "default"
                 # Update production cost for the current year
                 supplier.production_cost_by_year[env.year] = source_cost
@@ -646,7 +639,7 @@ def finalise_iteration(
 
     print(f"Demand for year {env.year}: is {env.current_demand * T_TO_KT:,.0f} kt")
     print(
-        f"Steel capacity for year {env.year}: is {sum([fg.capacity for p in uow.plants.list() for fg in p.furnace_groups if fg.status.lower() in env.config.active_statuses and fg.technology.product == 'steel']) * T_TO_KT:,.0f} kt"
+        f"Steel capacity for year {env.year}: is {sum([fg.capacity for p in uow.plants.list() for fg in p.furnace_groups if fg.status in env.config.active_statuses and fg.technology.product == 'steel']) * T_TO_KT:,.0f} kt"
     )
     logger.debug(f"finalising iteration. time: {datetime.now()}")
 
@@ -752,7 +745,6 @@ def update_dynamic_costs(cmd: commands.UpdateDynamicCosts, uow: UnitOfWork, env:
         - Cost of debt (with subsidies, if applicable)
         - CAPEX (with subsidies, if applicable)
         - Energy costs for all carriers (subsidised input, output, and unsubsidised)
-        - Expected utilisation (fleet average for the technology)
     """
     logger = logging.getLogger(f"{__name__}.update_dynamic_costs")
     with uow:
@@ -766,7 +758,6 @@ def update_dynamic_costs(cmd: commands.UpdateDynamicCosts, uow: UnitOfWork, env:
                 fg.energy_costs = cmd.new_energy_costs
                 fg.output_energy_costs = cmd.new_output_energy_costs
                 fg.energy_costs_no_subsidy = cmd.new_energy_costs_no_subsidy
-                fg.utilization_rate = cmd.new_utilization_rate
                 logger.debug(
                     "[HANDLER] UpdateDynamicCosts %s/%s: energy_costs=%s output=%s no_sub=%s",
                     cmd.plant_id,

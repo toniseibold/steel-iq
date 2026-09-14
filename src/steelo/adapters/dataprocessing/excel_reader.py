@@ -40,7 +40,6 @@ from steelo.utilities.utils import normalize_name
 # Import only true constants from global_variables
 from steelo.domain.constants import (
     Commodities,
-    INITIAL_SCRAP_PRODUCTION_COST,
     GJ_TO_KWH,
     MWH_TO_KWH,
     PERMWh_TO_PERkWh,
@@ -54,6 +53,7 @@ from steelo.domain.constants import (
 # TODO: Remove overwriting and replace by simulation config
 EXCEL_READER_START_YEAR = 2020
 EXCEL_READER_END_YEAR = 2060
+CHOSEN_DEMAND_SCENARIO = "BAU"
 
 EXCEL_BIOMASS_CO2_START_YEAR = 2024
 EXCEL_BIOMASS_CO2_END_YEAR = EXCEL_READER_END_YEAR
@@ -937,56 +937,17 @@ def refine_demand_centers_for_major_countries(old_centers):
     return corrected_old_centers + new_centers
 
 
-def _select_scenario_rows(df: pd.DataFrame, scenario: str, sheet_name: str) -> pd.DataFrame:
-    """
-    Return the rows of a demand/scrap sheet that belong to one scenario.
-
-    Args:
-        df: Sheet contents with a "Scenario" column.
-        scenario: Scenario name to keep.
-        sheet_name: Sheet name, used in the error message only.
-
-    Returns:
-        pd.DataFrame: The matching rows.
-
-    Raises:
-        ValueError: If no row carries the scenario, listing the names the sheet does have.
-    """
-    selected = df[df["Scenario"] == scenario]
-    if selected.empty:
-        available = sorted(df["Scenario"].dropna().unique())
-        raise ValueError(f"No rows for scenario {scenario!r} in sheet {sheet_name!r}; available: {available}")
-    return selected
-
-
 def read_demand_centers(
     *,
     gravity_distances_path: Path,
     demand_excel_path: Path,
     demand_sheet_name: str,
     location_csv: Path,
-    demand_scenario: str,
 ) -> list[DemandCenter]:
-    """
-    Read steel demand centres for one scenario from the demand sheet.
-
-    Args:
-        gravity_distances_path: Pickled {iso3: {iso3: distance}} dict.
-        demand_excel_path: Workbook holding the demand sheet.
-        demand_sheet_name: Sheet with "Scenario" / "Metric" columns and one column per year.
-        location_csv: Country centroid CSV used to place each centre.
-        demand_scenario: Value of the "Scenario" column to read.
-
-    Returns:
-        list[DemandCenter]: One centre per country, major countries split into sub-centres.
-
-    Raises:
-        ValueError: If the scenario is not present in the sheet.
-    """
     with gravity_distances_path.open("rb") as f:
         gravity_dict = pickle.load(f)
     demand_df = pd.read_excel(demand_excel_path, sheet_name=demand_sheet_name)
-    demand_df = _select_scenario_rows(demand_df, demand_scenario, demand_sheet_name)
+    demand_df = demand_df[demand_df["Scenario"] == CHOSEN_DEMAND_SCENARIO]
     # Strip whitespace from metric names to handle Excel inconsistencies
     demand_df["Metric"] = demand_df["Metric"].str.strip()
     demand_df = demand_df[demand_df["Metric"] == "Crude steel consumption for forming [kt]"]
@@ -1046,19 +1007,6 @@ def read_demand_centers(
     return refine_demand_centers_for_major_countries(demand_centers)
 
 
-def _initial_scrap_costs() -> dict[Year, float]:
-    """Placeholder scrap production cost for the whole simulation horizon.
-
-    Returns:
-        INITIAL_SCRAP_PRODUCTION_COST for every year from EXCEL_READER_START_YEAR to
-        EXCEL_READER_END_YEAR. Overwritten at run time: bootstrap applies the configured
-        value, then the annual repricing in handlers.py reprices from BOF hot-metal costs.
-    """
-    return {
-        Year(year): INITIAL_SCRAP_PRODUCTION_COST for year in range(EXCEL_READER_START_YEAR, EXCEL_READER_END_YEAR + 1)
-    }
-
-
 def refine_scrap_centers_for_major_countries(old_centers):
     """
     Refine centers for major (scrap exporting) countries by breaking down the absolute amount from
@@ -1100,6 +1048,12 @@ def refine_scrap_centers_for_major_countries(old_centers):
             for year in years:
                 amount_by_year[Year(year)] = old_center.capacity_by_year[Year(year)] * center["share"]
 
+            # Create constant production cost dictionary for all years in simulation horizon
+            # This initial value of 450 will be overwritten annually in handlers.py based on BOF hot_metal costs
+            production_cost_by_year = {
+                Year(year): 450.0 for year in range(EXCEL_READER_START_YEAR, EXCEL_READER_END_YEAR + 1)
+            }
+
             # Create new center with the new location and amount_by_year
             new_centers.append(
                 Supplier(
@@ -1107,7 +1061,7 @@ def refine_scrap_centers_for_major_countries(old_centers):
                     supplier_id=new_id,
                     location=location,
                     capacity_by_year=amount_by_year,
-                    production_cost_by_year=_initial_scrap_costs(),
+                    production_cost_by_year=production_cost_by_year,
                     mine_cost_by_year={},
                     mine_price_by_year={},
                 )
@@ -1126,24 +1080,9 @@ def read_scrap_as_suppliers(
     scrap_sheet_name: str,
     location_csv: str,
     gravity_distances_pkl_path: Path | None = None,
-    *,
-    scrap_scenario: str,
 ) -> list[Supplier]:
     """
     Read scrap supply data from Excel and return a list of Supplier domain objects for scrap.
-
-    Args:
-        scrap_excel_path: Workbook holding the scrap sheet.
-        scrap_sheet_name: Sheet with "Scenario" / "Metric" columns and one column per year.
-        location_csv: Country centroid CSV used to place each supplier.
-        gravity_distances_pkl_path: Pickled {iso3: {iso3: distance}} dict (required).
-        scrap_scenario: Value of the "Scenario" column to read.
-
-    Returns:
-        list[Supplier]: One scrap supplier per country, major countries split into sub-centres.
-
-    Raises:
-        ValueError: If the scenario is not present in the sheet, or the gravity path is missing.
     """
     if not gravity_distances_pkl_path:
         raise ValueError("gravity_distances_pkl_path must be provided")
@@ -1151,7 +1090,7 @@ def read_scrap_as_suppliers(
     with gravity_path.open("rb") as f:
         gravity_dict = pickle.load(f)
     scrap_df = pd.read_excel(scrap_excel_path, sheet_name=scrap_sheet_name)
-    scrap_df = _select_scenario_rows(scrap_df, scrap_scenario, scrap_sheet_name)
+    scrap_df = scrap_df[scrap_df["Scenario"] == CHOSEN_DEMAND_SCENARIO]
     # Strip whitespace from metric names to handle Excel inconsistencies
     scrap_df["Metric"] = scrap_df["Metric"].str.strip()
     scrap_df = scrap_df[scrap_df["Metric"] == "Total available scrap"]
@@ -1197,12 +1136,18 @@ def read_scrap_as_suppliers(
             except ValueError:
                 continue
 
+        # Create constant production cost dictionary for all years in simulation horizon
+        # This initial value of 450 will be overwritten annually in handlers.py based on BOF hot_metal costs
+        production_cost_by_year = {
+            Year(year): 450.0 for year in range(EXCEL_READER_START_YEAR, EXCEL_READER_END_YEAR + 1)
+        }
+
         supply_center = Supplier(
             commodity=Commodities.SCRAP.value,
             supplier_id=f"{scrap_location.country}_scrap",
             location=scrap_location,
             capacity_by_year=scrap_by_year,
-            production_cost_by_year=_initial_scrap_costs(),
+            production_cost_by_year=production_cost_by_year,
             mine_cost_by_year={},
             mine_price_by_year={},
         )
@@ -1398,21 +1343,15 @@ def read_carbon_costs(carbon_cost_excel_path: Path, sheet_name="Carbon cost") ->
 
 def read_regional_emissivities(excel_path: Path, grid_sheet_name: str, gas_sheet_name: str) -> list[RegionEmissivity]:
     """
-    Read regional grid and gas/coke emissivities from the master Excel.
+    Read grid_emissivity from from an Excel file and return a dictionary mapping ISO3 codes to Year and cost.
 
     Args:
         excel_path (Path): Path to the Excel file containing grid emissions data.
         grid_sheet_name (str): Name of the sheet containing grid emissions data.
         gas_sheet_name (str): Name of the sheet containing gas coke emissions data.
-
     Returns:
-        list[RegionEmissivity]: One entry per geography and scenario.
-
-    Notes:
-        The grid sheet's ISO column holds either a country ("CHN") or a sub-national
-        geo_key ("CHN:CN-HE"). Sub-national groups take gas/coke factors from their
-        country, and years they do not author are filled from the country's
-        same-scenario values. Sheets without geo_keys are read unchanged.
+        list[RegionEmissivity]: A list of RegionEmissivity objects containing emissions data
+        for each country and scenario.
     """
     grid_emission_df = pd.read_excel(excel_path, sheet_name=grid_sheet_name)
     gas_coke_emissions_df = pd.read_excel(excel_path, sheet_name=gas_sheet_name)
@@ -1455,11 +1394,6 @@ def read_regional_emissivities(excel_path: Path, grid_sheet_name: str, gas_sheet
     )
 
     # 2) Group gas coke emissions by vector name (only one year data) and no projections
-    # TODO FOR BACKLOG: coke/gas emissivity is scaffolding — it feeds env.fossil_emissivity,
-    # which nothing consumes. Known data bugs to fix before wiring it in: the sheet authors only
-    # ghg_factor_scope_1, so the .sum() below fabricates 0.0 for the all-NaN scope_2/scope_3_rest
-    # columns; the ghg_factor_scope3_methane_* columns miss the "ghg_factor_scope_" prefix and are
-    # silently dropped; units differ per vector (coal tCO2e/t vs gas tCO2e/GJ) and are not recorded.
     carbon_intensity_columns = [
         col for col in gas_coke_emissions_df.columns if col.lower().startswith("ghg_factor_scope_")
     ]
@@ -1479,41 +1413,16 @@ def read_regional_emissivities(excel_path: Path, grid_sheet_name: str, gas_sheet
 
     grouped_gas_coke = gas_coke_emissions_df.groupby([gas_iso_column, "Vector"])[carbon_intensity_columns].sum()
 
-    emissivity_by_group: dict[tuple[str, str], dict[Year, dict[str, float]]] = {
-        (str(key[0]), str(key[1])): dict(metrics)  # type: ignore[index]
-        for key, metrics in grouped_data.items()
-    }
-
-    # Fill years a sub-national group does not author from its country's same-scenario
-    # group, so a resolved sub-national entry never has a year hole the country could cover.
-    gap_fill_logger = logging.getLogger(f"{__name__}.read_regional_emissivities")
-    for (group_key, scenario_key), year_values in emissivity_by_group.items():
-        country_iso3, _, sub_code = group_key.partition(":")
-        if not sub_code:
-            continue
-        parent = emissivity_by_group.get((country_iso3, scenario_key)) or {}
-        filled = sorted(year for year in parent if year not in year_values)
-        if filled:
-            gap_fill_logger.warning(
-                "Grid emissivity: %s (%s) missing %d year(s); filled %s-%s from %s.",
-                group_key,
-                scenario_key,
-                len(filled),
-                filled[0],
-                filled[-1],
-                country_iso3,
-            )
-            for year in filled:
-                year_values[year] = parent[year]
-
     grid_emissivity_list: list[RegionEmissivity] = []
-    for (group_key, scenario), emissivity in emissivity_by_group.items():
-        # The ISO column holds a country ("CHN") or a sub-national geo_key ("CHN:CN-HE");
-        # gas/coke factors are authored per country only.
-        iso3, _, geo_unit = group_key.partition(":")
+    for key, metrics in grouped_data.items():
+        iso3_raw, scenario_raw = key  # type: ignore[misc]
+        iso3: str = str(iso3_raw)  # type: ignore[has-type]
+        scenario: str = str(scenario_raw)  # type: ignore[has-type]
+        # metrics is {'grid_carbon_intensity_value': {year: value}}
+        emissivity = metrics  # type: ignore[index]
 
         # look up the country name & net‐zero year
-        country_name: str = meta.at[(group_key, scenario), "country"]  # type: ignore[assignment]
+        country_name: str = meta.at[(iso3_raw, scenario_raw), "country"]  # type: ignore[assignment]
 
         # Cast the results of to_dict() to the expected type
         coke_dict = cast(dict[str, float], grouped_gas_coke.loc[iso3].loc["Coking coal"].to_dict())
@@ -1521,11 +1430,10 @@ def read_regional_emissivities(excel_path: Path, grid_sheet_name: str, gas_sheet
 
         grid_emissivity_list.append(
             RegionEmissivity(
-                iso3=iso3,
-                geo_unit=geo_unit or None,
+                iso3=iso3,  # type: ignore[has-type]
                 country_name=country_name,
-                scenario=scenario.removeprefix("projection_").replace("_", " ").title(),
-                grid_emissivity=emissivity,
+                scenario=scenario.removeprefix("projection_").replace("_", " ").title(),  # type: ignore[has-type]
+                grid_emissivity={key: value for key, value in emissivity.items()},
                 coke_emissivity=coke_dict,
                 gas_emissivity=gas_dict,
             )
@@ -2475,10 +2383,6 @@ def read_biomass_availability(excel_path: Path, sheet_name: str = "Biomass avail
         for year in year_columns:
             if pd.notna(row[year]):
                 try:
-                    if "kg" in unit.lower():
-                        conversion_factor = 1e-3  # Convert kg to t
-                    else:
-                        conversion_factor = 1.0  # No conversion needed
                     availability = BiomassAvailability(
                         region=region,
                         country=country,
@@ -2486,7 +2390,7 @@ def read_biomass_availability(excel_path: Path, sheet_name: str = "Biomass avail
                         scenario=scenario,
                         unit=unit,
                         year=Year(int(year)),
-                        availability=float(row[year]) * conversion_factor,
+                        availability=float(row[year]),
                     )
                     availabilities.append(availability)
                 except (ValueError, TypeError) as e:

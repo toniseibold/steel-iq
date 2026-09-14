@@ -20,7 +20,6 @@ from steelo.simulation_types import TechSettingsMap, get_default_technology_sett
 from steelo.utilities.memory_profiling import MemoryTracker
 
 from .domain import Year, PlantGroup
-from .domain.constants import CONSTRUCTION_TIME_DEFAULT, RANDOM_SEED_DEFAULT
 from .service_layer.message_bus import MessageBus
 from .economic_models import EconomicModel, PlantAgentsModel, AllocationModel, GeospatialModel
 from .domain.events import IterationOver
@@ -35,7 +34,7 @@ from steelo.utilities.plotting import (
 )
 from .adapters.geospatial.geospatial_statistics import aggregate_lcoe_lcoh_statistics
 from .logging_config import LoggingConfig
-from steelo.domain.constants import T_TO_KT, MT_TO_T, INITIAL_SCRAP_PRODUCTION_COST
+from steelo.domain.constants import T_TO_KT, MT_TO_T
 from steelo.domain.calculate_costs import (
     collect_subsidies_for_geo,
     filter_subsidies_for_year,
@@ -246,9 +245,7 @@ class GeoConfig:
     )
 
     # === Outgoing cashflow estimate (to build a new plant at a certain location) ===
-    pick_priority_sites_share: float = (
-        0.05  # Fraction of global grid points selected as priority locations for business opportunities
-    )
+    priority_pct: int = 5  # Percentage of global grid points selected as priority locations for business opportunities
     iron_ore_steel_ratio: float = 1.6  # Amount of iron ore needed to produce 1 unit of steel
     share_iron_vs_steel: dict[str, dict[str, float]] = field(
         default_factory=lambda: {
@@ -263,12 +260,8 @@ class GeoConfig:
         }
     )
 
-    # === Technology scope ===
-    # Technologies never considered for new greenfield plants; brownfield switching is unaffected
-    excluded_greenfield_technologies: list[str] = field(default_factory=lambda: ["BOF"])
-
     # === Other ===
-    random_seed: int = RANDOM_SEED_DEFAULT  # Seed for random number generation to ensure reproducibility
+    random_seed: int = 42  # Seed for random number generation to ensure reproducibility
 
 
 @dataclass
@@ -290,7 +283,7 @@ class SimulationConfig:
     # Solver configuration
     lp_epsilon: float = 1e-3  # LP solver epsilon
     capacity_limit: float = 0.95
-    soft_minimum_capacity_share: float = 0.6
+    soft_minimum_capacity_percentage: float = 0.6
     minimum_active_utilisation_rate: float = 0.01
     minimum_margin: float = 0.5
     hot_metal_radius: float = 5.0  # km - radius for allocation model
@@ -331,10 +324,10 @@ class SimulationConfig:
 
     # === Clustering Configuration ===
     enable_furnace_group_clustering: bool = False  # Feature flag for LP complexity reduction via clustering
-    # Geographical scope for clustering FGs that consume/produce closely-allocated commodities.
-    # Options: 'iso3' (country-level), 'plant_group' (corporate group), 'plant' (individual plant).
-    # This determines the granularity of clustering while keeping cold/hot commodity substitution local.
-    geographical_clustering_scope: str = "iso3"
+    # When True, FGs that consume/produce a closely-allocated commodity cluster by plant_group_id
+    # instead of iso3, so cold/hot commodity substitution in disaggregation stays local.
+    # When False, all FGs cluster by iso3 (pre-experiment behavior).
+    cluster_hot_metal_techs_by_plant_group: bool = False
 
     # === Plant Agent Module Parameters ===
     probabilistic_agents: bool = False  # Probabilitstic (mimick human decision-making) vs deterministic approach
@@ -363,11 +356,6 @@ class SimulationConfig:
     steel_price_buffer: float = 200.0  # USD/tonne - buffer above highest cost curve price when demand exceeds supply
     iron_price_buffer: float = 200.0  # USD/tonne - buffer above highest cost curve price when demand exceeds supply
 
-    # Placeholder scrap production cost applied to every scrap supplier at bootstrap; the annual
-    # repricing overwrites it from the second year onward and also uses it as the default when it
-    # has no BOF cost data to price from
-    initial_scrap_production_cost: float = INITIAL_SCRAP_PRODUCTION_COST  # USD/tonne
-
     # Fraction of total capacity that participates in market clearing; above this triggers shortage buffer
     # e.g. 0.95 truncates top 5% at price-extraction; 1.0 keeps the full curve
     steel_market_clearing_share: float = 0.95
@@ -395,29 +383,18 @@ class SimulationConfig:
     consideration_time: int = (
         3  # Minimum number of years a considered business opportunity needs to be NPV-positive before being announced
     )
-    construction_time: int = (
-        CONSTRUCTION_TIME_DEFAULT  # Years it takes to construct a plant after it has been announced
-    )
-    # probability_of_construction, probability_of_announcement, calculate_npv_sites_share, and
-    # geo_config.pick_priority_sites_share are all forced to deterministic values in
-    # __post_init__ when probabilistic_agents is False.
+    construction_time: int = 4  # Years it takes to construct a plant after it has been announced
+    # Both probabilities are forced to 1 in __post_init__ when probabilistic_agents is False
     probability_of_construction: float = 0.9  # Probability of a plant being constructed after being announced
     probability_of_announcement: float = 0.7  # Probability of a plant being announced after being considered - given a history of positive NPVs of at least `consideration_time` years
     top_n_loctechs_as_business_op: int = 15  # Number of top location-technology combinations to consider as business
     # opportunities per product per year (e.g., 5 for steel and 5 for iron = 10 total)
-    opportunity_pool_depth: int = 3  # Probabilistic draw eligibility: global top (depth * top_n) by NPV plus each
-    # allowed technology's best `depth` sites, so no technology loses standing to a monoculture head
-    calculate_npv_sites_share: float = 0.1  # Fraction of priority locations sampled each year for full NPV evaluation;
-    # 0.1 is chosen purely to save computational time, not for model reasons
     co2_storage_reserved_discount_factor: float = (
         0.9  # Fraction of an announced CCS plant's CO2 need that counts toward the reserved storage bucket
     )
 
     # === Scenario and Policy Settings ===
-    # Applied at data-prep time (rows of the "Demand and scrap availability" sheet) and part of the
-    # prep cache key; kept on the config so the choice is recorded in simulation_config.json
     chosen_demand_scenario: str = "BAU"
-    chosen_scrap_scenario: str = "BAU"
     chosen_grid_emissions_scenario: str = "Business As Usual"
     scrap_generation_scenario: str = "business_as_usual"
     chosen_emissions_boundary_for_carbon_costs: str = "rs-inspired"
@@ -462,11 +439,9 @@ class SimulationConfig:
     # === Randomness ===
     # Single seed shared by Plant Agent, Geospatial, and Trade LP modules.
     # Propagated to geo_config.random_seed in __post_init__.
-    random_seed: int = RANDOM_SEED_DEFAULT
+    random_seed: int = 42
 
     # === Other ===
-    # Human-readable run name shown in the interactive viewer titles (default: the output dir name)
-    run_name: Optional[str] = None
     # Verbosity
     log_level: int = logging.DEBUG
     # Repository (lazy-loaded, not serialized)
@@ -562,15 +537,10 @@ class SimulationConfig:
         # Single source of truth: propagate top-level seed into nested GeoConfig.
         self.geo_config.random_seed = self.random_seed
 
-        # Deterministic agents: the announcement/construction draws must always pass, and
-        # new-plant siting must evaluate NPV for every candidate location rather than a
-        # random sample (with pick_priority_sites_share narrowed to keep the full-sampling
-        # cost low).
+        # Deterministic agents: the announcement/construction draws must always pass
         if not self.probabilistic_agents:
             self.probability_of_construction = 1.0
             self.probability_of_announcement = 1.0
-            self.calculate_npv_sites_share = 1.0
-            self.geo_config.pick_priority_sites_share = 0.005
 
         # Handle deprecated parameter - preserve semantics by translating to technology_settings
         if global_bf_ban is not None:
@@ -1464,7 +1434,6 @@ class SimulationRunner:
                     "year": year,
                     "steel_price_usd_per_t": prices.get("steel", 0.0),
                     "iron_price_usd_per_t": prices.get("iron", 0.0),
-                    "steel_demand_t": prices["steel_demand"],
                 }
                 if "scrap" in prices:
                     row["scrap_price_usd_per_t"] = prices["scrap"]
@@ -1488,54 +1457,6 @@ class SimulationRunner:
             )
             if price_plot_path is not None:
                 logger.info(f"Saved market prices plot to {price_plot_path}")
-
-        # Interactive viewers (self-contained plotly HTML) under plots/interactive; after the
-        # market-prices export so the cost curves can read the recorded steel demand
-        from steelo.utilities.interactive import InteractivePlotter, clearing_config, run_display_title
-
-        if self.config.plots_dir is not None:
-            interactive = InteractivePlotter(
-                plots_dir=self.config.plots_dir,
-                country_mappings=bus.env.country_mappings.mappings,
-                run_title=run_display_title(self.config.run_name, self.config.output_dir.name, Path(output_path)),
-                geo_hierarchy_json=self.config.data_dir / "fixtures" / "geo_hierarchy.json"
-                if self.config.data_dir
-                else None,
-            )
-            fixtures_dir = self.config.data_dir / "fixtures" if self.config.data_dir else None
-            interactive.plot_emissions(post_processed_csv=Path(output_path))
-            interactive.plot_capacity_and_production(
-                post_processed_csv=Path(output_path),
-                demand_centers_json=fixtures_dir / "demand_centers.json" if fixtures_dir else None,
-            )
-            interactive.plot_cost_curves(
-                post_processed_csv=Path(output_path),
-                market_prices_csv=self.config.output_dir / "data" / f"market_prices_{start_year}_{end_year}.csv",
-                clearing=clearing_config(
-                    capacity_limit=bus.env.config.capacity_limit,
-                    steel_share=bus.env.config.steel_market_clearing_share,
-                    steel_buffer=bus.env.config.steel_price_buffer,
-                    iron_share=bus.env.config.iron_market_clearing_share,
-                    iron_buffer=bus.env.config.iron_price_buffer,
-                ),
-            )
-            interactive.plot_trade_matrix(tm_dir=self.config.output_dir / "TM")
-            interactive.plot_trade_network(tm_dir=self.config.output_dir / "TM")
-            interactive.plot_trade_allocations(tm_dir=self.config.output_dir / "TM")
-            interactive.plot_supply_demand(
-                tm_dir=self.config.output_dir / "TM",
-                suppliers_json=fixtures_dir / "suppliers.json" if fixtures_dir else None,
-                biomass_availability_json=fixtures_dir / "biomass_availability.json" if fixtures_dir else None,
-            )
-            interactive.plot_reductant_use(
-                post_processed_csv=Path(output_path),
-                primary_feedstocks_json=fixtures_dir / "primary_feedstocks.json" if fixtures_dir else None,
-            )
-            interactive.plot_metallic_charge_use(
-                post_processed_csv=Path(output_path),
-                primary_feedstocks_json=fixtures_dir / "primary_feedstocks.json" if fixtures_dir else None,
-                suppliers_json=fixtures_dir / "suppliers.json" if fixtures_dir else None,
-            )
 
         # Aggregate per-year LCOE/LCOH statistics into stacked CSVs
         aggregate_lcoe_lcoh_statistics(self.config.output_dir, start_year, end_year)
