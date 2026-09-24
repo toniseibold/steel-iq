@@ -123,6 +123,39 @@ def test_cli_creates_and_passes_simulation_config(
         assert config.end_year == Year(2035)
 
 
+@patch("steelo.entrypoints.cli.setup_legacy_symlinks")
+@patch("steelo.entrypoints.cli.update_output_symlink")
+@patch("steelo.entrypoints.cli.update_data_symlink")
+@patch("steelo.entrypoints.cli.bootstrap_simulation")
+@patch("steelo.data.DataPreparationService")
+@patch("steelo.data.DataManager")
+def test_cli_successful_run_returns_none_so_the_console_script_exits_zero(
+    mock_data_manager_class,
+    mock_data_prep_service_class,
+    mock_create_runner,
+    mock_update_data_symlink,
+    mock_update_output_symlink,
+    mock_setup_legacy_symlinks,
+):
+    """The console script calls sys.exit() on the return value, and anything but None or 0 exits non-zero."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        stub_cli_dependencies(Path(tmpdir), mock_data_manager_class, mock_data_prep_service_class, mock_create_runner)
+
+        with patch.object(sys, "argv", ["run_simulation", "--start-year", "2026", "--end-year", "2035"]):
+            result = run_full_simulation()
+
+    assert result is None
+
+
+@pytest.mark.parametrize("cache_flag", ["--cache-stats", "--clear-cache"])
+def test_cli_cache_operations_return_none_so_the_console_script_exits_zero(cache_flag, tmp_path):
+    """The cache-only flags finish without running a simulation and must not hand sys.exit() a message."""
+    with patch.object(sys, "argv", ["run_simulation", cache_flag, "--steelo-home", str(tmp_path)]):
+        result = run_full_simulation()
+
+    assert result is None
+
+
 @pytest.mark.parametrize(
     "flag_argv, expected",
     [([], "Business As Usual"), (["--grid-emissions-scenario", "Net Zero"], "Net Zero")],
@@ -193,6 +226,91 @@ def test_cli_random_seed_lands_on_the_config_and_geo_config(
 
 
 @pytest.mark.parametrize(
+    "flag_argv, expected_percentile, expected_trade",
+    [
+        ([], 100.0, False),
+        (["--hydrogen-ceiling-percentile", "20"], 20.0, False),
+        (["--intraregional-trade"], 100.0, True),
+        (["--no-intraregional-trade"], 100.0, False),
+        (["--hydrogen-ceiling-percentile", "20", "--intraregional-trade"], 20.0, True),
+    ],
+)
+@patch("steelo.entrypoints.cli.setup_legacy_symlinks")
+@patch("steelo.entrypoints.cli.update_output_symlink")
+@patch("steelo.entrypoints.cli.update_data_symlink")
+@patch("steelo.entrypoints.cli.bootstrap_simulation")
+@patch("steelo.data.DataPreparationService")
+@patch("steelo.data.DataManager")
+def test_cli_hydrogen_trade_flags_land_on_the_geo_config(
+    mock_data_manager_class,
+    mock_data_prep_service_class,
+    mock_create_runner,
+    mock_update_data_symlink,
+    mock_update_output_symlink,
+    mock_setup_legacy_symlinks,
+    flag_argv,
+    expected_percentile,
+    expected_trade,
+):
+    """``--hydrogen-ceiling-percentile`` and ``--[no-]intraregional-trade`` override the GeoConfig defaults."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cli_temp_base = Path(tmpdir)
+        stub_cli_dependencies(cli_temp_base, mock_data_manager_class, mock_data_prep_service_class, mock_create_runner)
+
+        argv = ["run_simulation", "--start-year", "2026", "--end-year", "2027", *flag_argv]
+        with patch.object(sys, "argv", argv):
+            with patch("sys.exit"):
+                run_full_simulation()
+
+        config = mock_create_runner.call_args[0][0]
+        assert config.geo_config.hydrogen_ceiling_percentile == expected_percentile
+        assert config.geo_config.intraregional_trade_allowed is expected_trade
+
+
+@pytest.mark.parametrize(
+    "flag_argv, expected_enabled, expected_scope",
+    [
+        ([], True, "plant"),
+        (["--clustering"], True, "plant"),
+        (["--no-clustering"], False, "plant"),
+        (["--enable-clustering", "--clustering-scope", "plant"], True, "plant"),
+        (["--clustering-scope", "iso3"], True, "iso3"),
+        (["--clustering-scope", "plant_group"], True, "plant_group"),
+    ],
+)
+@patch("steelo.entrypoints.cli.setup_legacy_symlinks")
+@patch("steelo.entrypoints.cli.update_output_symlink")
+@patch("steelo.entrypoints.cli.update_data_symlink")
+@patch("steelo.entrypoints.cli.bootstrap_simulation")
+@patch("steelo.data.DataPreparationService")
+@patch("steelo.data.DataManager")
+def test_cli_clustering_flags_land_on_the_config(
+    mock_data_manager_class,
+    mock_data_prep_service_class,
+    mock_create_runner,
+    mock_update_data_symlink,
+    mock_update_output_symlink,
+    mock_setup_legacy_symlinks,
+    flag_argv,
+    expected_enabled,
+    expected_scope,
+):
+    """Clustering by plant is the default; ``--[no-]clustering`` and ``--clustering-scope`` override it."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cli_temp_base = Path(tmpdir)
+        stub_cli_dependencies(cli_temp_base, mock_data_manager_class, mock_data_prep_service_class, mock_create_runner)
+
+        argv = ["run_simulation", "--start-year", "2026", "--end-year", "2027", *flag_argv]
+        with patch.object(sys, "argv", argv):
+            with patch("sys.exit"):
+                run_full_simulation()
+
+        config = mock_create_runner.call_args[0][0]
+        assert config.enable_furnace_group_clustering is expected_enabled
+        assert config.geographical_clustering_scope == expected_scope
+
+
+@pytest.mark.parametrize(
     "flag_argv, expected",
     [([], None), (["--run-name", "china BAU"], "china BAU")],
 )
@@ -224,3 +342,85 @@ def test_cli_run_name_lands_on_the_config(
 
         config = mock_create_runner.call_args[0][0]
         assert config.run_name == expected
+
+
+@pytest.mark.parametrize("flag_argv, expected", [([], False), (["--enable-capacity-policy"], True)])
+@patch("steelo.entrypoints.cli.setup_legacy_symlinks")
+@patch("steelo.entrypoints.cli.update_output_symlink")
+@patch("steelo.entrypoints.cli.update_data_symlink")
+@patch("steelo.entrypoints.cli.bootstrap_simulation")
+@patch("steelo.data.DataPreparationService")
+@patch("steelo.data.DataManager")
+def test_cli_capacity_policy_flag_drives_the_nested_config(
+    mock_data_manager_class,
+    mock_data_prep_service_class,
+    mock_create_runner,
+    mock_update_data_symlink,
+    mock_update_output_symlink,
+    mock_setup_legacy_symlinks,
+    flag_argv,
+    expected,
+):
+    """``--enable-capacity-policy`` is the only policy surface; absent, the run stays off."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cli_temp_base = Path(tmpdir)
+        stub_cli_dependencies(cli_temp_base, mock_data_manager_class, mock_data_prep_service_class, mock_create_runner)
+
+        argv = ["run_simulation", "--start-year", "2026", "--end-year", "2027", *flag_argv]
+        with patch.object(sys, "argv", argv):
+            with patch("sys.exit"):
+                run_full_simulation()
+
+        config = mock_create_runner.call_args[0][0]
+        assert config.capacity_policy.enabled is expected
+
+
+@pytest.mark.parametrize(
+    "argv_tail, message",
+    [
+        (["--enable-capacity-policy", "--credit-validity-years", "0"], "must be a positive number of years"),
+        (["--credit-validity-years", "3"], "requires --enable-capacity-policy"),
+    ],
+)
+def test_cli_credit_validity_years_is_refused_at_parse_time(argv_tail, message, capsys):
+    """A non-positive shelf life, or one given without the policy flag, stops the run before any setup."""
+    with patch.object(sys, "argv", ["run_simulation", *argv_tail]):
+        with pytest.raises(SystemExit) as raised:
+            run_full_simulation()
+
+    assert raised.value.code == 2
+    assert message in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "flag_argv, expected",
+    [(["--enable-capacity-policy"], None), (["--enable-capacity-policy", "--credit-validity-years", "2"], 2)],
+)
+@patch("steelo.entrypoints.cli.setup_legacy_symlinks")
+@patch("steelo.entrypoints.cli.update_output_symlink")
+@patch("steelo.entrypoints.cli.update_data_symlink")
+@patch("steelo.entrypoints.cli.bootstrap_simulation")
+@patch("steelo.data.DataPreparationService")
+@patch("steelo.data.DataManager")
+def test_cli_credit_validity_years_lands_on_the_policy_config(
+    mock_data_manager_class,
+    mock_data_prep_service_class,
+    mock_create_runner,
+    mock_update_data_symlink,
+    mock_update_output_symlink,
+    mock_setup_legacy_symlinks,
+    flag_argv,
+    expected,
+):
+    """``--credit-validity-years`` sets the banked-credit shelf life; absent, credits never expire."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cli_temp_base = Path(tmpdir)
+        stub_cli_dependencies(cli_temp_base, mock_data_manager_class, mock_data_prep_service_class, mock_create_runner)
+
+        argv = ["run_simulation", "--start-year", "2026", "--end-year", "2027", *flag_argv]
+        with patch.object(sys, "argv", argv):
+            with patch("sys.exit"):
+                run_full_simulation()
+
+        config = mock_create_runner.call_args[0][0]
+        assert config.capacity_policy.credit_validity_years == expected

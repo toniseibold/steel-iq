@@ -65,6 +65,16 @@ def sample_post_processed() -> pd.DataFrame:
     return table
 
 
+def sample_motions() -> pd.DataFrame:
+    """One pipeline arrival, as the motion recorder writes it."""
+    columns = ["year", "kind", "source", "furnace_group_id", "geo_key", "old_technology", "new_technology"]
+    columns += ["old_capacity_t", "new_capacity_t"]
+    return pd.DataFrame(
+        [[2025, "pipeline", "input_data", "P1_0", "BGD", None, "DRI", None, 2_200_000.0]],
+        columns=columns,
+    )
+
+
 def test_trade_bloc_members_from_boolean_attributes() -> None:
     """Every True boolean attribute counts as a bloc, including ones added dynamically; empty blocs vanish."""
     blocs = interactive_plots.trade_bloc_members(sample_country_mappings())
@@ -188,6 +198,43 @@ def test_plot_cost_curves_writes_self_contained_viewer(tmp_path) -> None:
     assert '"steel": {"2025": {"d": 1.0, "c": 500.0}}' in written.read_text()
 
 
+def test_plot_decision_flows_writes_self_contained_viewer(tmp_path) -> None:
+    """The decision-flow viewer carries the Sankey banding config alongside the shared shell."""
+    motions_csv = tmp_path / "pam_motions.csv"
+    sample_motions().to_csv(motions_csv, index=False)
+    plotter = InteractivePlotter(tmp_path / "plots", sample_country_mappings(), run_title="sim_test")
+
+    written = plotter.plot_decision_flows(motions_csv)
+
+    assert written == tmp_path / "plots" / "interactive" / "decision_flows.html"
+    html = written.read_text()
+    for placeholder in ("__PLOTLYJS__", "__COMMON_JS__", "__COMMON_CSS__", "__CONFIG__", "__DATA__"):
+        assert placeholder not in html
+    assert "const Interactive" in html
+    assert '"Pipeline"' in html
+    assert "P1_0" in html
+    assert '"tradeBlocs"' in html
+
+
+def test_missing_inputs_skip_the_viewer(tmp_path) -> None:
+    """A missing table or motions file, or a table without a viewer's columns, skips the viewer instead of failing."""
+    plotter = InteractivePlotter(tmp_path / "plots", [], run_title="sim_test")
+
+    assert plotter.plot_emissions(tmp_path / "absent.csv") is None
+    assert plotter.plot_capacity_and_production(tmp_path / "absent.csv") is None
+    assert plotter.plot_cost_curves(tmp_path / "absent.csv", tmp_path / "absent_prices.csv", CLEARING) is None
+    assert plotter.plot_decision_flows(tmp_path / "absent.csv") is None
+
+    csv_path = tmp_path / "post_processed_test.csv"
+    table = sample_post_processed()
+    table.drop(columns=[c for c in table if c.startswith("emissions_")]).to_csv(csv_path, index=False)
+    assert plotter.plot_emissions(csv_path) is None
+    assert plotter.plot_capacity_and_production(csv_path) is not None  # capacity/production need no emissions
+    assert plotter.plot_cost_curves(csv_path, tmp_path / "absent_prices.csv", CLEARING) is None  # no unit cost column
+    (tmp_path / "plots" / "interactive" / "capacity_and_production.html").unlink()
+    assert not list((tmp_path / "plots" / "interactive").iterdir())
+
+
 def test_plot_trade_matrix_writes_self_contained_viewer(tmp_path) -> None:
     """The trade-matrix viewer embeds every allocation year and the country-pair flows; no files → no viewer."""
     tm_dir = tmp_path / "TM"
@@ -244,6 +291,85 @@ def test_plot_trade_network_writes_self_contained_viewer(tmp_path) -> None:
     assert '{"y": 2025, "p": "steel", "c": "steel", "o": "CHN", "d": "IND", "t": "BOF", "v": 2.0}' in html
     assert '"coords": {"CHN": [1.0, 2.0], "IND": [1.0, 2.0]}' in html
     assert plotter.plot_trade_network(tmp_path / "absent") is None
+
+
+def test_plot_supply_chain_writes_self_contained_viewer(tmp_path) -> None:
+    """The supply-chain viewer embeds the furnace-group edges, coords and commodity colours; no files → no viewer."""
+    tm_dir = tmp_path / "TM"
+    tm_dir.mkdir()
+    header = "commodity,source_type,source_id,source_location,capacity_at_source,source_tech,destination_type,"
+    header += (
+        "destination_id,destination_location,allocated_volume,allocation_cost,demand_at_destination,supply_at_source"
+    )
+    loc = (
+        "Location(lat=1.0, lon=2.0, country='{0}', region='R', iso3='{0}', distance_to_other_iso3=None, geo_unit=None)"
+    )
+    row = f'steel,Plant-FurnaceGroup,P1_0,"{loc.format("CHN")}",1e6,BOF,DemandCenter,India,"{loc.format("IND")}",2e6,0,2e6,N/A'
+    (tm_dir / "steel_trade_allocations_2025.csv").write_text(f"{header}\n{row}\n")
+    (tm_dir / "steel_trade_allocations_2026.csv").write_text(f"{header}\n")
+    plotter = InteractivePlotter(tmp_path / "plots", sample_country_mappings(), run_title="sim_test")
+
+    written = plotter.plot_supply_chain(tm_dir)
+
+    assert written == tmp_path / "plots" / "interactive" / "supply_chain.html"
+    html = written.read_text()
+    for placeholder in ("__PLOTLYJS__", "__COMMON_JS__", "__COMMON_CSS__", "__CONFIG__", "__DATA__"):
+        assert placeholder not in html
+    assert '"chartTitle": "Supply chain"' in html
+    assert '"commodityColours": {"steel": "#0064ff"' in html
+    assert '"years": [2025, 2026]' in html
+    assert '"endpoints": [[0, "CHN", "P1_0"], [1, "IND", "India"]]' in html
+    assert '"edges": {"2025": {"c": [0], "s": [0], "d": [1], "t": [0], "v": [2000000]}}' in html
+    assert '"coords": {"CHN": [1.0, 2.0], "IND": [1.0, 2.0]}' in html
+    assert plotter.plot_supply_chain(tmp_path / "absent") is None
+
+
+def test_plot_embedded_emissions_map_writes_self_contained_viewer(tmp_path) -> None:
+    """The map embeds the matrices, polygons and provenance but no ore-mine coordinates; a missing input → no viewer."""
+    tm_dir = tmp_path / "TM"
+    tm_dir.mkdir()
+    header = "commodity,source_type,source_id,source_location,capacity_at_source,source_tech,destination_type,"
+    header += (
+        "destination_id,destination_location,allocated_volume,allocation_cost,demand_at_destination,supply_at_source"
+    )
+    loc = (
+        "Location(lat=1.0, lon=2.0, country='{0}', region='R', iso3='{0}', distance_to_other_iso3=None, geo_unit=None)"
+    )
+    row = f'steel,Plant-FurnaceGroup,P1_0,"{loc.format("CHN")}",1e6,BOF,DemandCenter,India,"{loc.format("IND")}",2e6,0,2e6,N/A'
+    mine = loc.format("AUS").replace("country='AUS'", "country='Pilbara'")
+    ore = f'io_high,Supplier,sup_a,"{mine}",N/A,N/A,Plant-FurnaceGroup,P1_0,"{loc.format("CHN")}",3e6,0,N/A,3e6'
+    (tm_dir / "steel_trade_allocations_2025.csv").write_text(f"{header}\n{row}\n{ore}\n")
+    post_processed_csv = tmp_path / "post_processed.csv"
+    pd.DataFrame(
+        {
+            "year": [2025],
+            "furnace_group_id": ["P1_0"],
+            "emissions_rs-inspired_direct_ghg": [3e6],
+            "emissions_rs-inspired_indirect_ghg": [1e6],
+        }
+    ).to_csv(post_processed_csv, index=False)
+    plotter = InteractivePlotter(tmp_path / "plots", sample_country_mappings(), run_title="sim_test")
+
+    written = plotter.plot_embedded_emissions_map(post_processed_csv, tm_dir, "rs-inspired")
+
+    assert written == tmp_path / "plots" / "interactive" / "embedded_emissions_map.html"
+    html = written.read_text()
+    for placeholder in ("__PLOTLYJS__", "__DECKGL__", "__COMMON_JS__", "__COUNTRIES__", "__CONFIG__", "__DATA__"):
+        assert placeholder not in html
+    assert '"chartTitle": "Emissions embedded in steel trade"' in html
+    assert '"countries":["CHN","IND"]' in html
+    assert '"boundaries":["rs-inspired"],"boundary":"rs-inspired"' in html
+    assert (
+        '"m":{"2025":{"rs-inspired|direct_ghg":{"s":[0],"d":[1],"t":[3000]},'
+        '"rs-inspired|indirect_ghg":{"s":[0],"d":[1],"t":[1000]}}}'
+    ) in html
+    assert '"coords":{"CHN":[1.0,2.0],"IND":[1.0,2.0]}' in html
+    assert "Pilbara" not in html
+    assert '"steel":{"2025":{"s":[0],"d":[1],"t":[2000]}}' in html
+    assert "the run's chosen boundary is rs-inspired" in html
+    assert plotter.plot_embedded_emissions_map(post_processed_csv, tmp_path / "absent", "rs-inspired") is None
+    assert plotter.plot_embedded_emissions_map(tmp_path / "absent.csv", tm_dir, "rs-inspired") is None
+    assert plotter.plot_embedded_emissions_map(post_processed_csv, tm_dir, "no-such-boundary") is None
 
 
 def supply_demand_country_mappings() -> list[CountryMapping]:
@@ -310,12 +436,12 @@ def test_tiam_regions_members_by_label() -> None:
     }
 
 
-def test_read_usage_groups_use_and_steel_demand_by_country(tmp_path) -> None:
-    """Steel counts at the demand centre (demand once per centre), scrap/ore at the source, bio at the consumer."""
+def test_read_usage_groups_use_by_country(tmp_path) -> None:
+    """Steel counts at the demand centre, scrap/ore at the source, bio at the consumer."""
     write_supply_demand_allocations(tmp_path / "TM")
     resolve = supply_demand.geo_resolver(supply_demand_country_mappings())
 
-    used, steel_demand = supply_demand.read_usage({2030: tmp_path / "TM" / "steel_trade_allocations_2030.csv"}, resolve)
+    used = supply_demand.read_usage({2030: tmp_path / "TM" / "steel_trade_allocations_2030.csv"}, resolve)
 
     used_rows = {(r.year, r.group, r.geo, r.grade): r.volume_mt for r in used.itertuples()}
     assert used_rows == {
@@ -324,7 +450,6 @@ def test_read_usage_groups_use_and_steel_demand_by_country(tmp_path) -> None:
         (2030, "ore", "BIH", "io_mid"): 0.2,  # ore keeps its grade for the viewer's grade ticks
         (2030, "bio", "CHN", ""): 0.1,
     }
-    assert [(r.year, r.geo, r.volume_mt) for r in steel_demand.itertuples()] == [(2030, "CHN", 2.0)]
 
 
 def test_availability_rows_from_suppliers_and_constraints() -> None:
@@ -364,6 +489,14 @@ def test_plot_supply_demand_writes_self_contained_viewer(tmp_path) -> None:
     write_supply_demand_allocations(tmp_path / "TM")
     fixtures = tmp_path / "fixtures"
     fixtures.mkdir()
+    china = Location(lat=1.0, lon=2.0, country="China", region="R", iso3="CHN")
+    uruguay = Location(lat=1.0, lon=2.0, country="Uruguay", region="R", iso3="URY")
+    DemandCenterJsonRepository(fixtures / "demand_centers.json").add_list(
+        [
+            DemandCenter("China_2", china, {Year(2030): Volumes(2_000_000), Year(2100): Volumes(9e9)}),
+            DemandCenter("Uruguay", uruguay, {Year(2030): Volumes(600_000)}),
+        ]
+    )
     scrap_location = Location(lat=1.0, lon=2.0, country="Germany", region="R", iso3="DEU")
     SupplierJsonRepository(fixtures / "suppliers.json").add_list(
         [Supplier("Germany_scrap", scrap_location, "scrap", {Year(2030): Volumes(1_000_000)}, {})]
@@ -377,6 +510,7 @@ def test_plot_supply_demand_writes_self_contained_viewer(tmp_path) -> None:
         tmp_path / "TM",
         suppliers_json=fixtures / "suppliers.json",
         biomass_availability_json=fixtures / "biomass_availability.json",
+        demand_centers_json=fixtures / "demand_centers.json",
     )
 
     assert written == tmp_path / "plots" / "interactive" / "supply_demand.html"
@@ -386,13 +520,15 @@ def test_plot_supply_demand_writes_self_contained_viewer(tmp_path) -> None:
     assert "const Interactive" in html
     assert '{"y": 2030, "c": "scrap", "g": "DEU", "v": 0.3}' in html
     assert '{"y": 2030, "c": "steel", "g": "CHN", "v": 2.0}' in html  # the demand centre's demand
+    assert '{"y": 2030, "c": "steel", "g": "URY", "v": 0.6}' in html  # a centre no plant delivered to
     assert '{"y": 2030, "c": "bio", "g": "region:CHI", "v": 3.0}' in html
     assert '"regionBudgets": {"region:CHI": ["CHN"]}' in html
 
-    # Missing fixtures still produce the viewer, with usage and steel demand only.
+    # Missing fixtures still produce the viewer, with usage only.
     assert plotter.plot_supply_demand(tmp_path / "TM") == written
     html = written.read_text()
     assert '{"y": 2030, "c": "ore", "g": "BIH", "v": 0.2, "s": "io_mid"}' in html
+    assert '{"y": 2030, "c": "steel", "g": "CHN", "v": 2.0}' not in html
     assert '"c": "bio", "g": "region:CHI"' not in html
     assert plotter.plot_supply_demand(tmp_path / "absent") is None
 
@@ -471,8 +607,9 @@ def test_plot_metallic_charge_use_writes_self_contained_viewer(tmp_path) -> None
     for placeholder in ("__PLOTLYJS__", "__COMMON_JS__", "__COMMON_CSS__", "__CONFIG__", "__DATA__"):
         assert placeholder not in html
     assert "const Interactive" in html
-    assert '{"y": 2025, "g": "CHN:CN-HE", "t": "BF", "p": "iron", "c": "io_low", "n": 1, "v": 3.0}' in html
-    assert '{"y": 2025, "g": "DEU", "t": "EAF", "p": "steel", "c": "scrap", "n": 1, "v": 1.1}' in html
+    assert '{"y": 2025, "g": "CHN:CN-HE", "t": "BF", "p": "iron", "c": "io_low", "v": 3.0}' in html
+    assert '{"y": 2025, "g": "DEU", "t": "EAF", "p": "steel", "c": "scrap", "v": 1.1}' in html
+    assert '{"y": 2025, "g": "DEU", "t": "EAF", "p": "steel", "cs": ["scrap"], "n": 1}' in html
     assert '"supply": [{"y": 2025, "g": "DEU", "v": 2.0}]' in html
     assert '"chargeColours"' in html and '"chargeOrder"' in html
 
@@ -486,3 +623,201 @@ def test_plot_metallic_charge_use_writes_self_contained_viewer(tmp_path) -> None
     bare_csv = tmp_path / "post_processed_bare.csv"
     sample_post_processed().drop(columns=["feedstock"]).to_csv(bare_csv, index=False)
     assert plotter.plot_metallic_charge_use(bare_csv, fixtures / "primary_feedstocks.json") is None
+
+
+def capacity_world_map_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path, dict[str, dict]]:
+    """The post-processed table with plant columns, a greenfield build, one decision, one expansion and the plants."""
+    table = sample_post_processed()
+    table["iso3"] = ["CHN", "DEU"]
+    table["plant_id"] = ["P1", "P2"]
+    csv_path = tmp_path / "post_processed_test.csv"
+    table.to_csv(csv_path, index=False)
+    greenfield_csv = tmp_path / "greenfield_status_timeseries.csv"
+    columns = ["year", "geo_key", "plant_id", "furnace_group_id", "technology", "product", "capacity", "status"]
+    pd.DataFrame(
+        [[2025, "DEU", "indi_1", "indi_1_0", "DRI", "iron", 2_000_000.0, "construction"]], columns=columns
+    ).to_csv(greenfield_csv, index=False)
+    decisions_csv = tmp_path / "pam_switch_decisions.csv"
+    columns = ["decision_year", "switch_year", "construction_start_year", "plant_id", "furnace_group_id", "geo_key"]
+    columns += ["product", "old_technology", "new_technology", "new_capacity_t"]
+    pd.DataFrame(
+        [[2025, 2029, None, "P1", "P1_0", "CHN:CN-HE", "iron", "BF", "DRI", 3_000_000.0]], columns=columns
+    ).to_csv(decisions_csv, index=False)
+    plants = {
+        "P1": {"lat": 39.0, "lon": 118.0, "greenfield": False},
+        "P2": {"lat": 51.0, "lon": 7.0, "greenfield": False},
+        "indi_1": {"lat": 53.0, "lon": 8.0, "greenfield": True},
+    }
+    motions_csv = tmp_path / "pam_motions.csv"
+    columns = ["year", "kind", "plant_id", "furnace_group_id", "geo_key", "product", "new_technology", "new_capacity_t"]
+    pd.DataFrame([[2025, "expansion", "P2", "P2_1", "DEU", "steel", "EAF", 2_500_000.0]], columns=columns).to_csv(
+        motions_csv, index=False
+    )
+    pipeline_csv = tmp_path / "pipeline_status_timeseries.csv"
+    columns = ["year", "plant_id", "furnace_group_id", "geo_key", "product", "technology", "status", "capacity"]
+    pd.DataFrame(
+        [[2025, "P2", "P2_2", "DEU", "iron", "DRI", "construction", 1_000_000.0, False]],
+        columns=[*columns, "created_by_pam"],
+    ).to_csv(pipeline_csv, index=False)
+    return csv_path, greenfield_csv, decisions_csv, motions_csv, pipeline_csv, plants
+
+
+def test_plot_capacity_world_map_writes_self_contained_viewer(tmp_path) -> None:
+    """The map lands in plots/interactive with the shared CSS, the polygons, the config and the payload inlined."""
+    csv_path, greenfield_csv, decisions_csv, motions_csv, pipeline_csv, plants = capacity_world_map_inputs(tmp_path)
+    plotter = InteractivePlotter(tmp_path / "plots", sample_country_mappings(), run_title="sim_test")
+
+    written = plotter.plot_capacity_world_map(
+        csv_path,
+        greenfield_csv,
+        decisions_csv,
+        motions_csv,
+        pipeline_csv,
+        plants,
+        {"P1": "Tangshan Works"},
+        ["gem_unit", "external"],
+    )
+
+    assert written == tmp_path / "plots" / "interactive" / "capacity_world_map.html"
+    html = written.read_text()
+    for placeholder in ("__COMMON_CSS__", "__WORLD__", "__CONFIG__", "__DATA__"):
+        assert placeholder not in html
+    assert ".box-dropdown" in html and '"CHN:CN-HE":{"type":' in html
+    assert '"source":"Source: Steel-IQ model (with GEM and EXTERNAL input data)"' in html
+    assert '"name":"Tangshan Works","iso":"CHN","geo":"CHN:CN-HE"' in html
+    assert '"name":"New plant indi_1"' in html and '["DRI","construction",2000,null,"indi_1_0"]' in html
+    assert '"switches":[[2025,2029,"BF","DRI"]]' in html
+    assert '["EAF","construction",2500,"expansion","P2_1"]' in html
+    assert '["DRI","construction",1000,"input data","P2_2"]' in html
+    assert "rebuilds from data/pam_switch_decisions.csv" in html and "Not available for this run" not in html
+    assert '"DEU": {"country": "Germany", "region": "Europe"}' in html
+
+
+def test_plot_capacity_world_map_degrades_on_missing_inputs(tmp_path, caplog) -> None:
+    """No table or a plant without coordinates skips the viewer; no decisions or greenfield file only drops that layer."""
+    csv_path, greenfield_csv, decisions_csv, motions_csv, pipeline_csv, plants = capacity_world_map_inputs(tmp_path)
+    plotter = InteractivePlotter(tmp_path / "plots", sample_country_mappings(), run_title="sim_test")
+    caplog.set_level("WARNING")
+
+    assert (
+        plotter.plot_capacity_world_map(
+            tmp_path / "absent.csv", greenfield_csv, decisions_csv, motions_csv, pipeline_csv, plants, {}, []
+        )
+        is None
+    )
+    assert "skipping the capacity world map viewer" in caplog.text
+    without_p2 = {plant_id: plant for plant_id, plant in plants.items() if plant_id != "P2"}
+    assert (
+        plotter.plot_capacity_world_map(
+            csv_path, greenfield_csv, decisions_csv, motions_csv, pipeline_csv, without_p2, {}, []
+        )
+        is None
+    )
+    assert "1 plants on the capacity map have no coordinates" in caplog.text
+
+    caplog.clear()
+    written = plotter.plot_capacity_world_map(
+        csv_path,
+        tmp_path / "absent.csv",
+        tmp_path / "absent2.csv",
+        tmp_path / "absent3.csv",
+        tmp_path / "absent4.csv",
+        plants,
+        {},
+        [],
+    )
+    assert written is not None
+    assert "rebuilds omitted from the capacity world map viewer" in caplog.text
+    assert "new builds under construction omitted from the capacity world map viewer" in caplog.text
+    assert "expansions under construction omitted from the capacity world map viewer" in caplog.text
+    assert "the existing fleet's construction pipeline omitted from the capacity world map viewer" in caplog.text
+    html = written.read_text()
+    assert '"switches":[]' in html and "indi_1" not in html and "P2_1" not in html
+    # the provenance names only what was read
+    assert "pam_switch_decisions.csv" not in html
+    assert (
+        "Not available for this run: new builds under construction, rebuilds, expansions under construction, "
+        "the existing fleet's construction pipeline." in html
+    )
+    assert "Source: Steel-IQ model (with GEM input data)" in html
+
+
+def test_plot_capacity_china_map_focuses_the_shared_viewer_on_china(tmp_path, caplog) -> None:
+    """Only Chinese plants are packed; the pool fixture gives the province groups; no Chinese plants skips it."""
+    from steelo.adapters.repositories.json_repository import CapacityPoolProvinceJsonRepository
+    from steelo.capacity_policy.inputs import RegionRow
+
+    csv_path, greenfield_csv, decisions_csv, motions_csv, pipeline_csv, plants = capacity_world_map_inputs(tmp_path)
+    pool_json = tmp_path / "capacity_pool_provinces.json"
+    CapacityPoolProvinceJsonRepository(pool_json).add_list(
+        [
+            RegionRow(geo_key="CHN:CN-HE", region_name="Jing-Jin-Ji", type="key"),
+            RegionRow(geo_key="CHN:CN-BJ", region_name="Jing-Jin-Ji", type="key"),
+        ],
+    )
+    plotter = InteractivePlotter(tmp_path / "plots", sample_country_mappings(), run_title="sim_test")
+
+    written = plotter.plot_capacity_china_map(
+        csv_path, greenfield_csv, decisions_csv, motions_csv, pipeline_csv, plants, {}, [], pool_json
+    )
+
+    assert written == tmp_path / "plots" / "interactive" / "capacity_china_map.html"
+    html = written.read_text()
+    assert '"chartTitle": "China iron and steel capacity by technology"' in html
+    assert '"focus": {"iso3": "CHN", "groups": {"CHN:CN-HE": "Jing-Jin-Ji", "CHN:CN-BJ": "Jing-Jin-Ji"}' in html
+    assert '"fileStem": "capacity_china_map"' in html
+    assert '"id":"P1"' in html and '"id":"P2"' not in html and "indi_1" not in html
+
+    # a policy-OFF run passes no fixture: same map, no groups
+    plotter.plot_capacity_china_map(csv_path, greenfield_csv, decisions_csv, motions_csv, pipeline_csv, plants, {}, [])
+    assert '"focus": {"iso3": "CHN", "groups": {}, "types": {}}' in written.read_text()
+    assert (
+        '"focus": null'
+        in plotter.plot_capacity_world_map(
+            csv_path, greenfield_csv, decisions_csv, motions_csv, pipeline_csv, plants, {}, []
+        ).read_text()
+    )
+
+    table = pd.read_csv(csv_path)
+    german_csv = tmp_path / "post_processed_german.csv"
+    table[table["iso3"] == "DEU"].to_csv(german_csv, index=False)
+    caplog.set_level("WARNING")
+    assert (
+        plotter.plot_capacity_china_map(
+            german_csv, tmp_path / "absent.csv", decisions_csv, motions_csv, pipeline_csv, plants, {}, []
+        )
+        is None
+    )
+    assert "The run has no plants in CHN — skipping the capacity china map viewer" in caplog.text
+
+
+def test_plot_capacity_world_map_never_fails_the_plot_stage(tmp_path, caplog) -> None:
+    """A truncated input file or a plant without coordinates skips the viewer with a warning instead of raising."""
+    csv_path, greenfield_csv, decisions_csv, motions_csv, pipeline_csv, plants = capacity_world_map_inputs(tmp_path)
+    plotter = InteractivePlotter(tmp_path / "plots", sample_country_mappings(), run_title="sim_test")
+    caplog.set_level("WARNING")
+
+    unlocated = {**plants, "P2": {"lat": None, "lon": None, "greenfield": False}}
+    assert (
+        plotter.plot_capacity_world_map(
+            csv_path, greenfield_csv, decisions_csv, motions_csv, pipeline_csv, unlocated, {}, []
+        )
+        is None
+    )
+    assert "1 plants on the capacity map have no coordinates" in caplog.text
+
+    truncated = tmp_path / "truncated.csv"
+    truncated.write_text('year,kind\n2025,"expansion')
+    assert (
+        plotter.plot_capacity_world_map(
+            csv_path, greenfield_csv, decisions_csv, truncated, pipeline_csv, plants, {}, []
+        )
+        is None
+    )
+    empty = tmp_path / "empty.csv"
+    empty.write_text("")
+    assert (
+        plotter.plot_capacity_world_map(csv_path, empty, decisions_csv, motions_csv, pipeline_csv, plants, {}, [])
+        is None
+    )
+    assert caplog.text.count("skipping the capacity world map viewer") == 3

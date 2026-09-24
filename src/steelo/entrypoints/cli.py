@@ -25,10 +25,14 @@ from ..bootstrap import bootstrap_simulation
 from ..utils.symlink_manager import update_data_symlink, update_output_symlink, setup_legacy_symlinks
 
 
-def run_full_simulation() -> str:
+def run_full_simulation() -> None:
     """
     Run a full simulation from start to end year with the
     configuration provided via command line arguments.
+
+    Notes:
+        The console script passes the return value to sys.exit(), so a successful run
+        returns None (exit code 0); failures call sys.exit() with a non-zero code.
     """
     console = Console()
 
@@ -96,6 +100,21 @@ def run_full_simulation() -> str:
         help="Human-readable run name shown in the interactive plot titles (default: the sim_<timestamp> dir name)",
     )
     parser.add_argument(
+        "--hydrogen-ceiling-percentile",
+        type=float,
+        default=None,
+        help=(
+            "Percentile of a region's LCOH used as the regional hydrogen price cap "
+            "(default: the GeoConfig value, 100, which disables the cap)"
+        ),
+    )
+    parser.add_argument(
+        "--intraregional-trade",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Allow hydrogen imports between linked regions (default: the GeoConfig value, off)",
+    )
+    parser.add_argument(
         "--location-csv",
         type=str,
         default=None,
@@ -142,20 +161,35 @@ def run_full_simulation() -> str:
         help="Path to BOA-generated baseload power simulation output directory (overrides default)",
     )
     parser.add_argument(
-        "--enable-clustering",
+        "--clustering",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Cluster furnace groups to reduce LP complexity (default: on)",
+    )
+    # Former spelling of --clustering, kept so existing launch scripts still parse
+    parser.add_argument(
+        "--enable-clustering", dest="clustering", action="store_true", default=None, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--plot-tm",
         action="store_true",
-        help="Enable furnace group clustering to reduce LP complexity",
+        help="Write the per-year trade maps under plots/TM (off by default; the interactive trade viewers replace them)",
+    )
+    parser.add_argument(
+        "--plot-geo",
+        action="store_true",
+        help="Write the geospatial PNGs under plots/GEO (off by default)",
     )
 
     parser.add_argument(
         "--clustering-scope",
         type=str,
         choices=["iso3", "plant_group", "plant"],
-        default="iso3",
+        default=None,
         help=(
             "When clustering is enabled, geographical scope for clustering hot-metal-affected techs. "
-            "'iso3' (default): cluster by country. 'plant_group': cluster by corporate group. "
-            "'plant': cluster by individual plant. "
+            "'plant' (default): cluster by individual plant. 'plant_group': cluster by corporate group. "
+            "'iso3': cluster by country. "
             "Only affects FGs with hot_metal/dri_*/liquid_iron feedstocks or outputs."
         ),
     )
@@ -179,10 +213,29 @@ def run_full_simulation() -> str:
             "(default: %(default)s); data preparation keeps its own fixed seed"
         ),
     )
+    parser.add_argument(
+        "--enable-capacity-policy",
+        action="store_true",
+        help="Enable China's capacity-replacement policy (default: disabled)",
+    )
+    parser.add_argument(
+        "--credit-validity-years",
+        type=int,
+        default=None,
+        help=(
+            "Years a capacity-pool credit may sit banked before it expires; requires "
+            "--enable-capacity-policy (default: no expiry)"
+        ),
+    )
 
     # Parse the command-line arguments
     try:
         args = parser.parse_args()
+
+        if args.credit_validity_years is not None and args.credit_validity_years <= 0:
+            parser.error("--credit-validity-years must be a positive number of years")
+        if args.credit_validity_years is not None and not args.enable_capacity_policy:
+            parser.error("--credit-validity-years requires --enable-capacity-policy")
 
         # Setup directories
         steelo_home = Path(args.steelo_home)
@@ -198,12 +251,12 @@ def run_full_simulation() -> str:
             console.print("[blue]Cache Statistics:[/blue]")
             for key, value in stats.items():
                 console.print(f"  {key}: {value}")
-            return "Cache stats displayed"
+            return
 
         if args.clear_cache:
             removed = cache_manager.clear_cache()
             console.print(f"[green]Cleared {removed} cached preparations[/green]")
-            return "Cache cleared"
+            return
 
         # Prepare output directory
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -300,6 +353,8 @@ def run_full_simulation() -> str:
                 "run_name": args.run_name,
                 "log_level": log_level,
                 "random_seed": args.random_seed,
+                "plot_tm": args.plot_tm,
+                "plot_geo": args.plot_geo,
             }
 
             # Add custom baseload_power_sim_dir if provided
@@ -314,10 +369,11 @@ def run_full_simulation() -> str:
             config = SimulationConfig.from_data_directory(**config_kwargs)
 
             # Override clustering setting from command line
-            if args.enable_clustering:
-                config.enable_furnace_group_clustering = True
-                console.print("[green]Furnace group clustering enabled[/green]")
-            if args.clustering_scope != "iso3":
+            if args.clustering is not None:
+                config.enable_furnace_group_clustering = args.clustering
+                state = "enabled" if args.clustering else "disabled"
+                console.print(f"[green]Furnace group clustering {state}[/green]")
+            if args.clustering_scope is not None:
                 config.geographical_clustering_scope = args.clustering_scope
                 console.print(f"[green]Hot-metal-affected techs will cluster by {args.clustering_scope}[/green]")
 
@@ -328,6 +384,21 @@ def run_full_simulation() -> str:
                 console.print(
                     f"[green]Iron price pegging enabled at {args.iron_to_steel_price_ratio:.0%} of steel price[/green]"
                 )
+
+            if args.enable_capacity_policy:
+                config.capacity_policy.enabled = True
+                console.print("[green]China capacity-replacement policy enabled[/green]")
+            if args.credit_validity_years is not None:
+                config.capacity_policy.credit_validity_years = args.credit_validity_years
+            if args.hydrogen_ceiling_percentile is not None:
+                config.geo_config.hydrogen_ceiling_percentile = args.hydrogen_ceiling_percentile
+                console.print(
+                    f"[green]Hydrogen ceiling at the {args.hydrogen_ceiling_percentile:g}th LCOH percentile[/green]"
+                )
+            if args.intraregional_trade is not None:
+                config.geo_config.intraregional_trade_allowed = args.intraregional_trade
+                state = "enabled" if args.intraregional_trade else "disabled"
+                console.print(f"[green]Intraregional hydrogen trade {state}[/green]")
 
             # Save config and metadata
             config_dict = {k: str(v) if isinstance(v, Path) else v for k, v in config.__dict__.items()}
@@ -387,6 +458,8 @@ def run_full_simulation() -> str:
                     "run_name": args.run_name,
                     "log_level": log_level,
                     "random_seed": args.random_seed,
+                    "plot_tm": args.plot_tm,
+                    "plot_geo": args.plot_geo,
                 }
 
                 # Add custom baseload_power_sim_dir if provided
@@ -403,10 +476,11 @@ def run_full_simulation() -> str:
                 config = SimulationConfig.from_data_directory(**config_kwargs)
 
                 # Override clustering setting from command line
-                if args.enable_clustering:
-                    config.enable_furnace_group_clustering = True
-                    console.print("[green]Furnace group clustering enabled[/green]")
-                if args.clustering_scope != "iso3":
+                if args.clustering is not None:
+                    config.enable_furnace_group_clustering = args.clustering
+                    state = "enabled" if args.clustering else "disabled"
+                    console.print(f"[green]Furnace group clustering {state}[/green]")
+                if args.clustering_scope is not None:
                     config.geographical_clustering_scope = args.clustering_scope
                     console.print(f"[green]Hot-metal-affected techs will cluster by {args.clustering_scope}[/green]")
 
@@ -417,6 +491,21 @@ def run_full_simulation() -> str:
                     console.print(
                         f"[green]Iron price pegging enabled at {args.iron_to_steel_price_ratio:.0%} of steel price[/green]"
                     )
+
+                if args.enable_capacity_policy:
+                    config.capacity_policy.enabled = True
+                    console.print("[green]China capacity-replacement policy enabled[/green]")
+                if args.credit_validity_years is not None:
+                    config.capacity_policy.credit_validity_years = args.credit_validity_years
+                if args.hydrogen_ceiling_percentile is not None:
+                    config.geo_config.hydrogen_ceiling_percentile = args.hydrogen_ceiling_percentile
+                    console.print(
+                        f"[green]Hydrogen ceiling at the {args.hydrogen_ceiling_percentile:g}th LCOH percentile[/green]"
+                    )
+                if args.intraregional_trade is not None:
+                    config.geo_config.intraregional_trade_allowed = args.intraregional_trade
+                    state = "enabled" if args.intraregional_trade else "disabled"
+                    console.print(f"[green]Intraregional hydrogen trade {state}[/green]")
 
                 # Save config and metadata
                 config_dict = {k: str(v) if isinstance(v, Path) else v for k, v in config.__dict__.items()}
@@ -495,8 +584,6 @@ def run_full_simulation() -> str:
         console.print("[green]Simulation completed![/green]")
         console.print(f"[green]Results in:[/green] {output_dir}")
         console.print(f"[green]Latest symlink:[/green] {latest_link}")
-
-        return f"Simulation completed! Results in: {output_dir}"
 
     except argparse.ArgumentError as e:
         console.print(f"[red]Argument parsing error: {e}[/red]")
@@ -754,12 +841,13 @@ def show_geo_plots() -> None:
 
     args = parser.parse_args()
 
-    # Create SimulationConfig from data directory
+    # Create SimulationConfig from data directory; this command exists to make the GEO plots
     config = SimulationConfig.from_data_directory(
         data_dir=args.data_dir,
         output_dir=args.output_dir,
         start_year=args.year,
         end_year=args.year,
+        plot_geo=True,
     )
 
     # Create PlotPaths object

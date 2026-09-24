@@ -19,7 +19,8 @@ import sys
 from steelo.simulation_types import TechSettingsMap, get_default_technology_settings
 from steelo.utilities.memory_profiling import MemoryTracker
 
-from .domain import Year, PlantGroup
+from .capacity_policy.config import CapacityPolicyConfig
+from .domain import Year, Plant, PlantGroup
 from .domain.constants import CONSTRUCTION_TIME_DEFAULT, RANDOM_SEED_DEFAULT
 from .service_layer.message_bus import MessageBus
 from .economic_models import EconomicModel, PlantAgentsModel, AllocationModel, GeospatialModel
@@ -29,10 +30,6 @@ from .adapters.dataprocessing.postprocessing.post_process_datacollection import 
     extract_and_process_stored_dataCollection,
 )
 from .adapters.dataprocessing.postprocessing.generate_post_run_plots import generate_post_run_cap_prod_plots
-from steelo.utilities.plotting import (
-    plot_bar_chart_of_new_plants_by_status,
-    plot_map_of_new_plants_operating,
-)
 from .adapters.geospatial.geospatial_statistics import aggregate_lcoe_lcoh_statistics
 from .logging_config import LoggingConfig
 from steelo.domain.constants import T_TO_KT, MT_TO_T, INITIAL_SCRAP_PRODUCTION_COST
@@ -42,6 +39,8 @@ from steelo.domain.calculate_costs import (
     get_subsidised_energy_costs,
 )
 from .furnace_breakdown_logging_minimal import FurnaceBreakdownLogger
+from .capacity_policy.handlers import flush_capacity_policy_outputs, record_motion_on_pipeline_group_operating
+from .motions import flush_global_motions
 
 if TYPE_CHECKING:
     from .adapters.repositories import Repository
@@ -167,10 +166,8 @@ class GeoConfig:
 
     # === Power and Hydrogen ===
     included_power_mix: str = "85% baseload + 15% grid"  # Options: "85% baseload + 15% grid", "95% baseload + 5% grid", "Not included", "Grid only"
-    hydrogen_ceiling_percentile: float = 20.0  # Hydrogen price cap percentage to engage in interregional trade (e.g., within the EU). Set to 100 to inhibit interregional trade.
-    intraregional_trade_allowed: bool = (
-        True  # Whether trade among linked regions is allowed (e.g., Soviet Union and EU)
-    )
+    hydrogen_ceiling_percentile: float = 100.0  # Percentile of a region's LCOH capping its hydrogen price; 100 = no cap
+    intraregional_trade_allowed: bool = False  # Whether linked regions (e.g., Africa and Western Europe) trade hydrogen
     long_dist_pipeline_transport_cost: float = 1.0  # USD/kgH2
     # Which regions trade with which ones? (to[from])
     intraregional_trade_matrix: dict[str, Optional[list[str]]] = field(
@@ -330,11 +327,11 @@ class SimulationConfig:
     )
 
     # === Clustering Configuration ===
-    enable_furnace_group_clustering: bool = False  # Feature flag for LP complexity reduction via clustering
+    enable_furnace_group_clustering: bool = True  # LP complexity reduction via clustering
     # Geographical scope for clustering FGs that consume/produce closely-allocated commodities.
     # Options: 'iso3' (country-level), 'plant_group' (corporate group), 'plant' (individual plant).
     # This determines the granularity of clustering while keeping cold/hot commodity substitution local.
-    geographical_clustering_scope: str = "iso3"
+    geographical_clustering_scope: str = "plant"
 
     # === Plant Agent Module Parameters ===
     probabilistic_agents: bool = False  # Probabilitstic (mimick human decision-making) vs deterministic approach
@@ -391,6 +388,10 @@ class SimulationConfig:
     # === Geospatial Module Parameters ===
     # Best locations for new plants
     geo_config: GeoConfig = field(default_factory=GeoConfig)
+
+    # === China capacity-replacement policy ===
+    # Dormant by default; data comes from the optional Capacity pool sheets
+    capacity_policy: CapacityPolicyConfig = field(default_factory=CapacityPolicyConfig)
     # New plant opening
     consideration_time: int = (
         3  # Minimum number of years a considered business opportunity needs to be NPV-positive before being announced
@@ -426,6 +427,8 @@ class SimulationConfig:
     # Use InitVar to accept but not store deprecated parameter for backward compatibility
     global_bf_ban: InitVar[bool] = None
     include_tariffs: bool = True  # Whether to include tariffs in trade modeling
+    plot_tm: bool = False  # Write the per-year trade maps under plots/TM
+    plot_geo: bool = False  # Write the geospatial PNGs under plots/GEO
 
     # === Optional paths ===
     # Input data (for locating fixtures)
@@ -435,6 +438,7 @@ class SimulationConfig:
     geo_plots_dir: Optional[Path] = None  # If None, will be set to plots_dir/GEO
     pam_plots_dir: Optional[Path] = None  # If None, will be set to plots_dir/PAM
     tm_output_dir: Path | None = None  # Computed Trade Module attributes (set in __post_init__)
+    policy_output_dir: Path | None = None  # If None, will be set to output_dir/data/policy
     # Geo Data Paths (for geospatial calculations) - only needed for specific geo calculations and provided by the
     # calling code when needed
     terrain_nc_path: Optional[Path] = None
@@ -521,6 +525,9 @@ class SimulationConfig:
                 biomass_availability_path=fixtures_dir / "biomass_availability.json",
                 technology_emission_factors_path=fixtures_dir / "technology_emission_factors.json",
                 willingness_to_pay_path=fixtures_dir / "willingness_to_pay.json",
+                capacity_pool_provinces_path=fixtures_dir / "capacity_pool_provinces.json",
+                capacity_pool_technologies_path=fixtures_dir / "capacity_pool_technologies.json",
+                capacity_pool_opening_credits_path=fixtures_dir / "capacity_pool_opening_credits.json",
                 current_simulation_year=int(self.start_year),
             )
 
@@ -614,11 +621,12 @@ class SimulationConfig:
             self.plots_dir = Path(self.plots_dir)
         self.plots_dir.mkdir(parents=True, exist_ok=True)
 
-        if self.geo_plots_dir is None:
+        if self.geo_plots_dir is None and self.plot_geo:
             self.geo_plots_dir = self.plots_dir / "GEO"
-        else:
+        elif self.geo_plots_dir is not None:
             self.geo_plots_dir = Path(self.geo_plots_dir)
-        self.geo_plots_dir.mkdir(parents=True, exist_ok=True)
+        if self.geo_plots_dir is not None:
+            self.geo_plots_dir.mkdir(parents=True, exist_ok=True)
 
         if self.pam_plots_dir is None:
             self.pam_plots_dir = self.plots_dir / "PAM"
@@ -629,6 +637,12 @@ class SimulationConfig:
         # Create TM output directory
         self.tm_output_dir = self.output_dir / "TM"
         self.tm_output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Capacity-policy artefacts; created by the flush, so a policy-OFF run leaves no empty directory
+        if self.policy_output_dir is None:
+            self.policy_output_dir = self.output_dir / "data" / "policy"
+        else:
+            self.policy_output_dir = Path(self.policy_output_dir)
 
         # Convert optional geo paths to Path objects if provided
         if self.terrain_nc_path is not None:
@@ -955,6 +969,34 @@ class Progress:
     current_year: Year | None = None
 
 
+def _mark_announced_input_units_as_construction(plants: list[Plant]) -> int:
+    """Turn the input data's announced furnace groups into groups under construction.
+
+    Args:
+        plants: The run's plants at the start of the simulation.
+
+    Returns:
+        The number of furnace groups renamed.
+
+    Notes:
+        An announced unit of the input data starts operating in its start year with
+        certainty, unlike an announced greenfield opportunity, which can still be
+        discarded. As a group under construction it is booked as a firm CO2 storage
+        commitment and reads as committed capacity in every output. The status is
+        assigned directly: the status-change command would reset the start year and
+        count the capacity against the year's new-build limit.
+    """
+    renamed = 0
+    for plant in plants:
+        if plant.parent_gem_id.lower().startswith("indi_"):
+            continue
+        for fg in plant.furnace_groups:
+            if fg.status.lower() == "announced" and not fg.created_by_PAM:
+                fg.status = "construction"
+                renamed += 1
+    return renamed
+
+
 def _seed_opening_balances(
     plant_groups: list,
     env: Any,
@@ -1120,6 +1162,9 @@ class SimulationRunner:
         _log_memory_usage("memory_snapshot", stage="simulation_start")
         memory_tracker.checkpoint("simulation_start")
 
+        renamed = _mark_announced_input_units_as_construction(bus.uow.plants.list())
+        logger.info("Marked %d announced furnace groups of the input data as under construction", renamed)
+
         plant_groups = {}
         for plant in bus.uow.plants.list():
             plant_groups[plant.ultimate_plant_group] = plant_groups.get(plant.ultimate_plant_group, []) + [plant]
@@ -1278,6 +1323,8 @@ class SimulationRunner:
                     ):
                         if fg.status.lower() != "construction switching technology":
                             fg.status = "operating"
+                            # Records only data-born pipeline groups; model builds carry created_by_PAM
+                            record_motion_on_pipeline_group_operating(plant, fg, bus.uow, bus.env)
                             logging.info(
                                 f"Transitioned furnace group {fg.furnace_group_id} from construction to operating"
                             )
@@ -1371,6 +1418,17 @@ class SimulationRunner:
         progress = Progress(start_year=start_year, end_year=end_year, current_year=end_year + 1)
         self.progress_callback(progress)
 
+        # China capacity policy (nothing recorded if policy is OFF)
+        flush_capacity_policy_outputs(self.config.policy_output_dir)
+        # Global motions: all countries, every run
+        flush_global_motions(self.config.output_dir / "data")
+        # Per-year status snapshots of greenfield (GEO-origin) furnace groups
+        data_collector.write_greenfield_status_csv(self.config.output_dir / "data")
+        # One row per technology-switch decision, brownfield and greenfield
+        data_collector.write_switch_decisions_csv(self.config.output_dir / "data")
+        # One row per year and not-yet-operating furnace group of the existing fleet
+        data_collector.write_pipeline_status_csv(self.config.output_dir / "data")
+
         # Postprocessing
         output_path = extract_and_process_stored_dataCollection(
             commands=commands,
@@ -1383,8 +1441,6 @@ class SimulationRunner:
             iso3_to_country_map=bus.env.country_mappings.code_to_country_map,
             iso3_to_region_map=bus.env.country_mappings.iso3_to_region(),
         )
-        plot_bar_chart_of_new_plants_by_status(data_collector.status_counts, plot_paths=bus.env.plot_paths)
-        plot_map_of_new_plants_operating(data_collector.new_plant_locations, plot_paths=bus.env.plot_paths)
         steel_demand_by_year = {
             year: float(prices["steel_demand"]) for year, prices in data_collector.trace_price.items()
         }
@@ -1407,6 +1463,24 @@ class SimulationRunner:
         # Create plotter with default configuration
         plot_config = PlotConfig()
         plotter = SteelPlotter(config=plot_config, plot_paths=bus.env.plot_paths)
+
+        # Capacity-pool policy charts (a policy-OFF run flushed no artefacts, so none are drawn)
+        from steelo.capacity_policy.plotter import CapacityPoolPlotter
+
+        capacity_pool_plotter = CapacityPoolPlotter(config=plot_config, plot_paths=bus.env.plot_paths)
+        if capacity_pool_plotter.plot_all(self.config.policy_output_dir):
+            logger.info("Generated capacity pool charts")
+
+        # Greenfield (GEO-origin) plant status charts, maps, and plant-level CSV
+        if data_collector.status_counts:
+            plotter.plot_greenfield_plants_by_status(status_counts=data_collector.status_counts)
+            logger.info("Generated greenfield plant status charts")
+        if data_collector.new_plant_locations:
+            plotter.plot_greenfield_plants_map(new_plant_locations=data_collector.new_plant_locations)
+            logger.info("Generated greenfield plant maps")
+        if data_collector.greenfield_plants:
+            plotter.export_greenfield_plants_csv(data_collector.greenfield_plants)
+            logger.info("Exported greenfield plants CSV")
 
         # Plot CAPEX investments by technology and year
         if data_collector.trace_capex:
@@ -1519,13 +1593,21 @@ class SimulationRunner:
                     iron_buffer=bus.env.config.iron_price_buffer,
                 ),
             )
+            interactive.plot_decision_flows(motions_csv=self.config.output_dir / "data" / "pam_motions.csv")
             interactive.plot_trade_matrix(tm_dir=self.config.output_dir / "TM")
             interactive.plot_trade_network(tm_dir=self.config.output_dir / "TM")
+            interactive.plot_supply_chain(tm_dir=self.config.output_dir / "TM")
             interactive.plot_trade_allocations(tm_dir=self.config.output_dir / "TM")
+            interactive.plot_embedded_emissions_map(
+                post_processed_csv=Path(output_path),
+                tm_dir=self.config.output_dir / "TM",
+                boundary=bus.env.config.chosen_emissions_boundary_for_carbon_costs,
+            )
             interactive.plot_supply_demand(
                 tm_dir=self.config.output_dir / "TM",
                 suppliers_json=fixtures_dir / "suppliers.json" if fixtures_dir else None,
                 biomass_availability_json=fixtures_dir / "biomass_availability.json" if fixtures_dir else None,
+                demand_centers_json=fixtures_dir / "demand_centers.json" if fixtures_dir else None,
             )
             interactive.plot_reductant_use(
                 post_processed_csv=Path(output_path),
@@ -1535,6 +1617,39 @@ class SimulationRunner:
                 post_processed_csv=Path(output_path),
                 primary_feedstocks_json=fixtures_dir / "primary_feedstocks.json" if fixtures_dir else None,
                 suppliers_json=fixtures_dir / "suppliers.json" if fixtures_dir else None,
+            )
+            interactive.plot_greenfield_status(
+                greenfield_status_csv=self.config.output_dir / "data" / "greenfield_status_timeseries.csv",
+            )
+            interactive.plot_greenfield_map(
+                greenfield_status_csv=self.config.output_dir / "data" / "greenfield_status_timeseries.csv",
+                post_processed_csv=Path(output_path),
+                primary_feedstocks_json=fixtures_dir / "primary_feedstocks.json" if fixtures_dir else None,
+            )
+            capacity_map_inputs: dict[str, Any] = dict(
+                post_processed_csv=Path(output_path),
+                greenfield_status_csv=self.config.output_dir / "data" / "greenfield_status_timeseries.csv",
+                switch_decisions_csv=self.config.output_dir / "data" / "pam_switch_decisions.csv",
+                motions_csv=self.config.output_dir / "data" / "pam_motions.csv",
+                pipeline_status_csv=self.config.output_dir / "data" / "pipeline_status_timeseries.csv",
+                plants={
+                    p.plant_id: {
+                        "lat": p.location.lat,
+                        "lon": p.location.lon,
+                        "greenfield": p.parent_gem_id.lower().startswith("indi_"),
+                    }
+                    for p in bus.uow.plants.list()
+                },
+                plant_names=bus.env.plant_names,
+                input_sources=bus.env.input_sources,
+            )
+            interactive.plot_capacity_world_map(**capacity_map_inputs)
+            # the China map groups provinces by the capacity pool's regions on policy-ON runs only
+            interactive.plot_capacity_china_map(
+                **capacity_map_inputs,
+                capacity_pool_provinces_json=fixtures_dir / "capacity_pool_provinces.json"
+                if fixtures_dir and self.config.capacity_policy.enabled
+                else None,
             )
 
         # Aggregate per-year LCOE/LCOH statistics into stacked CSVs

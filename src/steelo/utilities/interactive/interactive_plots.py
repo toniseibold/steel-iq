@@ -27,10 +27,16 @@ from steelo.utilities.plotting import region2colours, tech2colours
 
 from . import (
     capacity_production,
+    capacity_world_map,
     cost_curves,
+    decision_flows,
+    embedded_emissions_map,
     emissions,
+    greenfield_map,
+    greenfield_status,
     metallic_charge_use,
     reductant_use,
+    supply_chain,
     supply_demand,
     trade_allocations,
     trade_matrix,
@@ -116,11 +122,23 @@ class InteractivePlotter:
         >>> interactive.plot_emissions(post_processed_csv)
         >>> interactive.plot_capacity_and_production(post_processed_csv, demand_centers_json)
         >>> interactive.plot_cost_curves(post_processed_csv, market_prices_csv, clearing)
+        >>> interactive.plot_decision_flows(motions_csv)
         >>> interactive.plot_trade_matrix(tm_dir)
         >>> interactive.plot_trade_network(tm_dir)
         >>> interactive.plot_trade_allocations(tm_dir)
+        >>> interactive.plot_embedded_emissions_map(post_processed_csv, tm_dir, boundary)
         >>> interactive.plot_reductant_use(post_processed_csv, primary_feedstocks_json)
         >>> interactive.plot_metallic_charge_use(post_processed_csv, primary_feedstocks_json, suppliers_json)
+        >>> interactive.plot_greenfield_status(greenfield_status_csv)
+        >>> interactive.plot_greenfield_map(greenfield_status_csv, post_processed_csv, primary_feedstocks_json)
+        >>> interactive.plot_capacity_world_map(
+        ...     post_processed_csv, greenfield_status_csv, switch_decisions_csv, motions_csv, pipeline_status_csv,
+        ...     plants, plant_names, input_sources,
+        ... )
+        >>> interactive.plot_capacity_china_map(
+        ...     post_processed_csv, greenfield_status_csv, switch_decisions_csv, motions_csv, pipeline_status_csv,
+        ...     plants, plant_names, input_sources,
+        ... )
     """
 
     SUBDIR = "interactive"
@@ -280,6 +298,33 @@ class InteractivePlotter:
         logger.info("Wrote cost-curve viewer %s (%d furnace-group rows)", path, len(fgs))
         return path
 
+    def plot_decision_flows(self, motions_csv: Path) -> Optional[Path]:
+        """Write the decision-flow Sankey viewer (``decision_flows.html``) from the run's PAM motions.
+
+        Args:
+            motions_csv: The run's global motions file (``data/pam_motions.csv``).
+
+        Returns:
+            The written path, or None when the motions file does not exist. A file with
+            zero motions still produces a viewer (it shows an empty-state note), so an
+            unexpectedly quiet run stays visible rather than silent.
+        """
+        if not motions_csv.is_file():
+            logger.warning("No motions file at %s — skipping the decision-flow viewer", motions_csv)
+            return None
+        motions = pd.read_csv(motions_csv)
+        data = {
+            self.run_title: {
+                "title": self.run_title,
+                "provenance": "Motions from the PAM motion recorder (data/pam_motions.csv).",
+                "motions": decision_flows.pack_motions(motions),
+            },
+        }
+        config = self._config("Furnace-group decision flows", **decision_flows.CHART_CONFIG)
+        path = self._write("decision_flows.html", config, data)
+        logger.info("Wrote decision-flow viewer %s (%d motions)", path, len(motions))
+        return path
+
     TRADE_PROVENANCE = (
         "Trade-LP allocations from TM/steel_trade_allocations_<year>.csv: steel plant → demand centre, "
         "iron products plant → steelmaking furnace group, ore mine → furnace group, "
@@ -373,6 +418,48 @@ class InteractivePlotter:
         logger.info("Wrote trade-network viewer %s (%d flows over %d years)", path, len(rows), len(years))
         return path
 
+    def plot_supply_chain(self, tm_dir: Path) -> Optional[Path]:
+        """Write the supply-chain viewer (``supply_chain.html``) from the per-year allocation files.
+
+        The viewer traces the steel demand of one country or one region back through the
+        steel plants that served it, the iron products and scrap those plants took in, and
+        the ore behind that iron. The trace runs in the browser over the furnace-group-level edges
+        embedded here (:func:`supply_chain.pack_edges`), attributing upstream volumes pro
+        rata to the share of each furnace group's output that went down the chain, and
+        is drawn per country and tier with the trade network's layouts.
+
+        Args:
+            tm_dir: The run's ``TM`` output directory holding ``steel_trade_allocations_<year>.csv``.
+
+        Returns:
+            The written path, or None when no allocation file exists or one cannot be read
+            (logged as warnings so the plot stage never fails).
+        """
+        files = trade_matrix.allocation_files(tm_dir)
+        if not files:
+            logger.warning("No steel_trade_allocations_<year>.csv under %s — skipping the supply-chain viewer", tm_dir)
+            return None
+        try:
+            chain = supply_chain.pack_edges(files)
+            coords = trade_matrix.read_coords(files)
+        except ValueError as exc:
+            logger.warning("%s — skipping the supply-chain viewer", exc)
+            return None
+        data = {
+            self.run_title: {
+                "title": self.run_title,
+                "provenance": self.TRADE_PROVENANCE,
+                "years": list(files),
+                "coords": coords,
+                "chain": chain,
+            },
+        }
+        colours = {c: "#%02x%02x%02x" % tuple(rgb) for c, rgb in trade_allocations.COMMODITY_COLOURS.items()}
+        path = self._write("supply_chain.html", self._config("Supply chain", commodityColours=colours), data)
+        edges = sum(len(year["v"]) for year in chain["edges"].values())
+        logger.info("Wrote supply-chain viewer %s (%d edges over %d years)", path, edges, len(files))
+        return path
+
     def plot_trade_allocations(self, tm_dir: Path) -> Optional[Path]:
         """Write the trade-allocations map viewer (``trade_allocations.html``).
 
@@ -417,22 +504,80 @@ class InteractivePlotter:
         logger.info("Wrote trade-allocations viewer %s (%d arcs over %d years)", path, arcs, len(years))
         return path
 
+    def plot_embedded_emissions_map(self, post_processed_csv: Path, tm_dir: Path, boundary: str) -> Optional[Path]:
+        """Write the embedded emissions map (``embedded_emissions_map.html``).
+
+        A choropleth of the emissions embedded in steel trade: every furnace group's
+        emissions are carried along the realised allocations to the country that consumed
+        the steel (:mod:`embedded_emissions_map`), giving production-based and
+        consumption-based emissions per country and year, the emissions embedded in
+        imports and exports, and the partners behind them — for every emissions boundary
+        of the table and the direct, direct incl. biogenic and indirect scopes.
+
+        Args:
+            post_processed_csv: The run's post-processed table (furnace-group emissions).
+            tm_dir: The run's ``TM`` output directory holding ``steel_trade_allocations_<year>.csv``.
+            boundary: The run's chosen emissions boundary
+                (``chosen_emissions_boundary_for_carbon_costs``), e.g. ``rs-inspired`` — the
+                one the viewer opens on.
+
+        Returns:
+            The written path, or None when an input is missing or cannot be read (logged
+            as warnings so the plot stage never fails).
+        """
+        viewer = "embedded emissions map"
+        post_processed = self._read_post_processed(post_processed_csv, viewer)
+        if post_processed is None:
+            return None
+        files = trade_matrix.allocation_files(tm_dir)
+        if not files:
+            logger.warning("No steel_trade_allocations_<year>.csv under %s — skipping the %s", tm_dir, viewer)
+            return None
+        try:
+            payload = embedded_emissions_map.pack_years(post_processed, files, boundary)
+            # Dots for the countries without a polygon; read_coords also returns the ore mines' labels.
+            coords = {
+                key: position
+                for key, position in trade_matrix.read_coords(files).items()
+                if key in payload["countries"]
+            }
+        except ValueError as exc:
+            logger.warning("%s — skipping the %s", exc, viewer)
+            return None
+        provenance = (
+            f"Furnace-group emissions of the selected boundary and scope (the run's chosen boundary is {boundary}; "
+            'direct excludes biogenic CO2 unless "incl. biogenic" is ticked) from '
+            f"{post_processed_csv.name}, carried along the trade module's realised allocations "
+            "(TM/steel_trade_allocations_<year>.csv) pro rata to volume: iron furnace group → steel furnace "
+            "group → demand centre. Ore and scrap carry no emissions inside the model."
+        )
+        data = {self.run_title: {"title": self.run_title, "provenance": provenance, "coords": coords, **payload}}
+        path = embedded_emissions_map.write_viewer(
+            self._config("Emissions embedded in steel trade"), data, self.output_dir / "embedded_emissions_map.html"
+        )
+        logger.info("Wrote embedded emissions map %s (%d years)", path, len(payload["years"]))
+        return path
+
     def plot_supply_demand(
         self,
         tm_dir: Path,
         suppliers_json: Optional[Path] = None,
         biomass_availability_json: Optional[Path] = None,
+        demand_centers_json: Optional[Path] = None,
     ) -> Optional[Path]:
         """Write the supply and demand viewer (``supply_demand.html``).
 
         Args:
             tm_dir: The run's ``TM`` output directory holding ``steel_trade_allocations_<year>.csv``,
-                which gives every commodity's use (and the steel demand).
+                which gives every commodity's use.
             suppliers_json: The prepared ``fixtures/suppliers.json``, for scrap and ore
                 availability. None (or a missing file) omits those availabilities with a warning.
             biomass_availability_json: The prepared ``fixtures/biomass_availability.json``,
                 for the CO2 storage limits and biomass budgets. None (or a missing file)
                 omits them with a warning.
+            demand_centers_json: The prepared ``fixtures/demand_centers.json``, for the steel
+                demand — the demand the trade LP is asked to serve, including centres it
+                leaves fully unserved. None (or a missing file) omits it with a warning.
 
         Returns:
             The written path, or None when no allocation file exists or one cannot be read
@@ -440,6 +585,7 @@ class InteractivePlotter:
         """
         from steelo.adapters.repositories.json_repository import (
             BiomassAvailabilityJsonRepository,
+            DemandCenterJsonRepository,
             SupplierJsonRepository,
         )
 
@@ -449,7 +595,7 @@ class InteractivePlotter:
             return None
         resolve = supply_demand.geo_resolver(self.country_mappings)
         try:
-            used, steel_demand = supply_demand.read_usage(files, resolve)
+            used = supply_demand.read_usage(files, resolve)
         except ValueError as exc:
             logger.warning("%s — skipping the supply-demand viewer", exc)
             return None
@@ -470,14 +616,19 @@ class InteractivePlotter:
         avail, region_budgets = supply_demand.availability_rows(
             suppliers, biomass_items, self.country_mappings, set(files)
         )
-        avail = pd.concat([avail, steel_demand.assign(group="steel", grade="")], ignore_index=True)
+        if demand_centers_json is not None and demand_centers_json.is_file():
+            centres = DemandCenterJsonRepository(demand_centers_json).list()
+            steel_demand = capacity_production.steel_demand_rows(centres, set(files))
+            avail = pd.concat([avail, steel_demand.assign(group="steel", grade="")], ignore_index=True)
+        else:
+            logger.warning("No demand centres fixture at %s — steel demand omitted", demand_centers_json)
 
         data = {
             self.run_title: {
                 "title": self.run_title,
-                "provenance": "Use and steel demand from TM/steel_trade_allocations_<year>.csv; scrap and ore "
-                "availability from fixtures/suppliers.json; CO2 storage and biomass limits from "
-                "fixtures/biomass_availability.json.",
+                "provenance": "Use from TM/steel_trade_allocations_<year>.csv; steel demand from "
+                "fixtures/demand_centers.json; scrap and ore availability from fixtures/suppliers.json; "
+                "CO2 storage and biomass limits from fixtures/biomass_availability.json.",
                 "years": list(files),
                 "rows": supply_demand.pack_rows(used),
                 "avail": supply_demand.pack_rows(avail),
@@ -591,10 +742,11 @@ class InteractivePlotter:
             return None
         feedstocks = PrimaryFeedstockJsonRepository(primary_feedstocks_json).list()
         try:
-            aggregated = metallic_charge_use.aggregate_charge_use(table, feedstocks)
+            charges = metallic_charge_use.charge_rows(table, feedstocks)
         except ValueError as exc:
             logger.warning("%s — skipping the metallic-charge viewer", exc)
             return None
+        aggregated = metallic_charge_use.aggregate_charge_use(charges)
 
         suppliers = []
         if suppliers_json is not None and suppliers_json.is_file():
@@ -611,6 +763,7 @@ class InteractivePlotter:
                 "identified by the Bill of Materials (fixtures/primary_feedstocks.json); local scrap "
                 "supply from fixtures/suppliers.json.",
                 "rows": metallic_charge_use.pack_rows(aggregated),
+                "groups": metallic_charge_use.pack_charge_sets(metallic_charge_use.count_charge_sets(charges)),
                 "supply": metallic_charge_use.pack_supply(supply),
             },
         }
@@ -626,6 +779,307 @@ class InteractivePlotter:
             len(aggregated),
             len(supply),
         )
+        return path
+
+    def plot_greenfield_status(self, greenfield_status_csv: Path) -> Optional[Path]:
+        """Write the greenfield status viewer (``greenfield_status.html``).
+
+        The viewer is the static ``greenfield/<product>_greenfield_status.png``
+        charts made interactive: greenfield (GEO-origin) furnace groups per year
+        stacked by lifecycle status or by technology, as plant count, capacity
+        or production, showing either the stock in each status or the flow
+        entering it.
+
+        Args:
+            greenfield_status_csv: The run's ``data/greenfield_status_timeseries.csv``.
+
+        Returns:
+            The written path, or None when the CSV is missing (a run may create no
+            greenfield groups) or lacks a required column (logged as warnings so
+            the plot stage never fails).
+        """
+        if not greenfield_status_csv.is_file():
+            logger.warning(
+                "No greenfield status timeseries at %s — skipping the greenfield status viewer",
+                greenfield_status_csv,
+            )
+            return None
+        try:
+            aggregated = greenfield_status.aggregate_status(pd.read_csv(greenfield_status_csv))
+        except ValueError as exc:
+            logger.warning("%s — skipping the greenfield status viewer", exc)
+            return None
+        data = {
+            self.run_title: {
+                "title": self.run_title,
+                "provenance": f"Per-year greenfield furnace-group snapshots from data/{greenfield_status_csv.name}.",
+                "rows": greenfield_status.pack_rows(aggregated),
+            },
+        }
+        config = self._config("Greenfield status", statusColours=greenfield_status.STATUS_COLOURS)
+        path = self._write("greenfield_status.html", config, data)
+        logger.info("Wrote greenfield status viewer %s (%d aggregated rows)", path, len(aggregated))
+        return path
+
+    def plot_greenfield_map(
+        self,
+        greenfield_status_csv: Path,
+        post_processed_csv: Optional[Path] = None,
+        primary_feedstocks_json: Optional[Path] = None,
+    ) -> Optional[Path]:
+        """Write the greenfield buildout map viewer (``greenfield_map.html``).
+
+        The map is the static ``greenfield/<product>_greenfield_map*.png`` charts
+        made interactive: every greenfield furnace group as a capacity-sized dot
+        over the trade map's world outline, with a year slider, filters for
+        status, technology, product, reductant and metallic charge, and hover
+        tooltips carrying each group's full history — the year it entered each
+        status, technology and reductant switches, and the shown year's
+        production and charge allocations.
+
+        Args:
+            greenfield_status_csv: The run's ``data/greenfield_status_timeseries.csv``.
+            post_processed_csv: The run's ``post_processed_<timestamp>.csv``, whose
+                feedstock rows give each group's per-year metallic charges. None (or
+                a missing file) omits the charge filter and tooltip lines with a warning.
+            primary_feedstocks_json: The prepared ``fixtures/primary_feedstocks.json``
+                (the Bill of Materials), which identifies charge rows. None (or a
+                missing file) omits the charges like a missing table does.
+
+        Returns:
+            The written path, or None when the timeseries is missing (a run may
+            create no greenfield groups) or lacks a required column (logged as
+            warnings so the plot stage never fails).
+        """
+        from steelo.adapters.repositories.json_repository import PrimaryFeedstockJsonRepository
+
+        if not greenfield_status_csv.is_file():
+            logger.warning(
+                "No greenfield status timeseries at %s — skipping the greenfield map viewer", greenfield_status_csv
+            )
+            return None
+        timeseries = pd.read_csv(greenfield_status_csv)
+
+        charges = None
+        charge_source = ""
+        table = self._read_post_processed(post_processed_csv, "greenfield map") if post_processed_csv else None
+        if table is None or primary_feedstocks_json is None or not primary_feedstocks_json.is_file():
+            logger.warning(
+                "No post-processed table or no primary feedstocks fixture at %s — metallic charges omitted "
+                "from the greenfield map viewer",
+                primary_feedstocks_json,
+            )
+        else:
+            feedstocks = PrimaryFeedstockJsonRepository(primary_feedstocks_json).list()
+            try:
+                charges = greenfield_map.greenfield_charges(table, feedstocks, set(timeseries["furnace_group_id"]))
+                charge_source = (
+                    f"; metallic charges from {post_processed_csv.name} via the Bill of Materials"
+                    if post_processed_csv
+                    else ""
+                )
+            except ValueError as exc:
+                logger.warning("%s — metallic charges omitted from the greenfield map viewer", exc)
+
+        try:
+            payload = greenfield_map.pack_groups(timeseries, charges)
+        except ValueError as exc:
+            logger.warning("%s — skipping the greenfield map viewer", exc)
+            return None
+        data = {
+            self.run_title: {
+                "title": self.run_title,
+                "provenance": f"Per-year greenfield furnace-group snapshots from data/{greenfield_status_csv.name}"
+                f"{charge_source}.",
+                **payload,
+            },
+        }
+        config = self._config(
+            "Greenfield buildout map",
+            statusColours=greenfield_status.STATUS_COLOURS,
+            reductantColours=reductant_use.REDUCTANT_COLOURS,
+            chargeColours=metallic_charge_use.CHARGE_COLOURS,
+        )
+        path = greenfield_map.write_viewer(config, data, self.output_dir / "greenfield_map.html")
+        logger.info("Wrote greenfield map viewer %s (%d groups)", path, len(payload["groups"]))
+        return path
+
+    def plot_capacity_world_map(
+        self,
+        post_processed_csv: Path,
+        greenfield_status_csv: Path,
+        switch_decisions_csv: Path,
+        motions_csv: Path,
+        pipeline_status_csv: Path,
+        plants: dict[str, dict[str, Any]],
+        plant_names: dict[str, str],
+        input_sources: list[str],
+    ) -> Optional[Path]:
+        """Write the capacity world map viewer (``capacity_world_map.html``).
+
+        The map draws one pie per plant (area = capacity, wedges = technology) with
+        a year slider, filters for technology, status, plant origin and geography, a
+        statistics side panel and a PNG export.
+
+        Args:
+            post_processed_csv: The run's ``post_processed_<timestamp>.csv``, giving the
+                operating furnace groups per year.
+            greenfield_status_csv: The run's ``data/greenfield_status_timeseries.csv``,
+                for new builds under construction. A missing file omits them with a warning.
+            switch_decisions_csv: The run's ``data/pam_switch_decisions.csv``, for groups
+                being rebuilt for a technology switch. A missing or empty file (older
+                runs) omits the rebuilds with a warning.
+            motions_csv: The run's ``data/pam_motions.csv``, whose ``expansion`` rows give
+                the expansions at existing plants while they are built. A missing file
+                omits them with a warning. Only a fallback for runs without the pipeline table.
+            pipeline_status_csv: The run's ``data/pipeline_status_timeseries.csv``, for the
+                existing fleet's groups that are not operating yet (the input data's
+                pipeline units and the PAM's expansions). A missing file (older runs)
+                omits the input data's units before they operate, with a warning.
+            plants: ``{plant_id: {"lat", "lon", "greenfield"}}`` of the run's live plants.
+            plant_names: ``{plant_id: plant_name}`` from the master's Furnace units sheet.
+            input_sources: The distinct ``source`` values of that sheet, for the source line.
+
+        Returns:
+            The written path, or None when the table is missing, a table lacks a required
+            column, a plant has no coordinates or anything else goes wrong (logged as
+            warnings so the plot stage never fails).
+        """
+        return self._plot_capacity_map(
+            "capacity_world_map",
+            "World iron and steel capacity by technology",
+            None,
+            post_processed_csv,
+            greenfield_status_csv,
+            switch_decisions_csv,
+            motions_csv,
+            pipeline_status_csv,
+            plants,
+            plant_names,
+            input_sources,
+        )
+
+    def plot_capacity_china_map(
+        self,
+        post_processed_csv: Path,
+        greenfield_status_csv: Path,
+        switch_decisions_csv: Path,
+        motions_csv: Path,
+        pipeline_status_csv: Path,
+        plants: dict[str, dict[str, Any]],
+        plant_names: dict[str, str],
+        input_sources: list[str],
+        capacity_pool_provinces_json: Optional[Path] = None,
+    ) -> Optional[Path]:
+        """Write the capacity China map viewer (``capacity_china_map.html``).
+
+        The capacity world map focused on China: only Chinese plants, provinces as
+        the geography unit and an equirectangular view fitted to the country.
+
+        Args:
+            post_processed_csv: As for :meth:`plot_capacity_world_map`.
+            greenfield_status_csv: As for :meth:`plot_capacity_world_map`.
+            switch_decisions_csv: As for :meth:`plot_capacity_world_map`.
+            motions_csv: As for :meth:`plot_capacity_world_map`.
+            pipeline_status_csv: As for :meth:`plot_capacity_world_map`.
+            plants: As for :meth:`plot_capacity_world_map`.
+            plant_names: As for :meth:`plot_capacity_world_map`.
+            input_sources: As for :meth:`plot_capacity_world_map`.
+            capacity_pool_provinces_json: The prepared ``fixtures/capacity_pool_provinces.json``,
+                passed on policy-ON runs: its province groups (Jing-Jin-Ji, …) become the
+                map's regions. None (or a missing file) leaves the map without groups.
+
+        Returns:
+            The written path, or None as for :meth:`plot_capacity_world_map` and when the
+            run has no Chinese plants (logged as warnings so the plot stage never fails).
+        """
+        from steelo.adapters.repositories.json_repository import CapacityPoolProvinceJsonRepository
+
+        region_rows = CapacityPoolProvinceJsonRepository(capacity_pool_provinces_json).list()
+        return self._plot_capacity_map(
+            "capacity_china_map",
+            "China iron and steel capacity by technology",
+            capacity_world_map.focus_config("CHN", region_rows),
+            post_processed_csv,
+            greenfield_status_csv,
+            switch_decisions_csv,
+            motions_csv,
+            pipeline_status_csv,
+            plants,
+            plant_names,
+            input_sources,
+        )
+
+    def _plot_capacity_map(
+        self,
+        file_stem: str,
+        chart_title: str,
+        focus: Optional[dict[str, Any]],
+        post_processed_csv: Path,
+        greenfield_status_csv: Path,
+        switch_decisions_csv: Path,
+        motions_csv: Path,
+        pipeline_status_csv: Path,
+        plants: dict[str, dict[str, Any]],
+        plant_names: dict[str, str],
+        input_sources: list[str],
+    ) -> Optional[Path]:
+        """Write one capacity map viewer; ``focus`` (:func:`.capacity_world_map.focus_config`) narrows it to a country.
+
+        Notes:
+            The maps run last in a multi-hour run, so every failure here — a truncated CSV,
+            an unexpected value — is logged and skips the viewer instead of propagating.
+        """
+        viewer = file_stem.replace("_", " ")
+        table = self._read_post_processed(post_processed_csv, viewer)
+        if table is None:
+            return None
+        try:
+            optional: dict[str, Optional[pd.DataFrame]] = {}
+            # the provenance names only the inputs this run really had
+            read = [f"operating furnace groups from {post_processed_csv.name}"]
+            absent = []
+            for name, csv_path, layer in (
+                ("greenfield", greenfield_status_csv, "new builds under construction"),
+                ("decisions", switch_decisions_csv, "rebuilds"),
+                ("motions", motions_csv, "expansions under construction"),
+                ("pipeline", pipeline_status_csv, "the existing fleet's construction pipeline"),
+            ):
+                frame = pd.read_csv(csv_path) if csv_path.is_file() else None
+                if frame is None or frame.empty:
+                    logger.warning("No rows at %s — %s omitted from the %s viewer", csv_path, layer, viewer)
+                    absent.append(layer)
+                else:
+                    read.append(f"{layer} from data/{csv_path.name}")
+                optional[name] = frame
+            provenance = "; ".join(read) + "."
+            if absent:
+                provenance += f" Not available for this run: {', '.join(absent)}."
+            payload = capacity_world_map.pack_sites(
+                table,
+                optional["greenfield"],
+                optional["decisions"],
+                optional["motions"],
+                optional["pipeline"],
+                plants,
+                plant_names,
+                focus["iso3"] if focus else None,
+            )
+            data = {
+                self.run_title: {
+                    "title": self.run_title,
+                    "provenance": provenance[0].upper() + provenance[1:],
+                    "source": capacity_world_map.source_line(input_sources),
+                    **payload,
+                },
+            }
+            config = self._config(chart_title, focus=focus, fileStem=file_stem)
+            path = capacity_world_map.write_viewer(config, data, self.output_dir / f"{file_stem}.html")
+        except Exception as exc:
+            # a ValueError is an expected input problem; anything else gets its traceback
+            logger.warning("%s — skipping the %s viewer", exc, viewer, exc_info=not isinstance(exc, ValueError))
+            return None
+        logger.info("Wrote %s viewer %s (%d plants)", viewer, path, len(payload["sites"]))
         return path
 
     def _config(self, chart_title: str, **chart_config: Any) -> dict[str, Any]:
