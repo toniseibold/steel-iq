@@ -1408,6 +1408,12 @@ class PrimaryFeedstockJsonRepository:
         self._write_models(list(locked.values()))
         self._all = None
 
+    def replace_all(self, pf_list: List[PrimaryFeedstock]) -> None:
+        """Replace the repository with the current workbook's feedstocks."""
+        entries = [PrimaryFeedstockInDb.from_domain(pf) for pf in pf_list]
+        self._write_models(entries)
+        self._all = None
+
     def to_json(self) -> str:
         """
         Return the JSON text for all PrimaryFeedstockInDb entries currently cached.

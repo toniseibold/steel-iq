@@ -725,10 +725,8 @@ def recreate_primary_feedstock_data(
     primary_feedstock_json_path: Path, excel_path: Path, bom_excel_sheet: str = "Bill of Materials"
 ) -> PrimaryFeedstockJsonRepository:
     """
-    Recreate the JSON PrimaryFeedstock data.
-    If json_path already exists, it is deleted first.
-    If excel_path is provided, read from that Excel to build domain objects; otherwise,
-    you must have already constructed a list of PrimaryFeedstock elsewhere.
+    Replace the JSON PrimaryFeedstock data with the workbook's current business cases.
+    Read the workbook before replacing existing data so a read failure preserves it.
     """
     # 2) Instantiate repository:
     repo = PrimaryFeedstockJsonRepository(primary_feedstock_json_path)
@@ -737,7 +735,7 @@ def recreate_primary_feedstock_data(
     pf_dict, aggregated_constraints = read_dynamic_business_cases(str(excel_path), excel_sheet=bom_excel_sheet)
     # Flatten the dict to get a single list of PrimaryFeedstock objects
     pf_list = [pf for pf_list in pf_dict.values() for pf in pf_list]
-    repo.add_list(pf_list)
+    repo.replace_all(pf_list)
     # Note: aggregated_constraints are not stored in the repository - they should be added to environment
 
     return repo
