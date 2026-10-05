@@ -1,5 +1,6 @@
 import logging
-from typing import TYPE_CHECKING, Callable, NamedTuple, Sequence, TypedDict, Any
+from functools import lru_cache
+from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Sequence, TypedDict
 import math
 
 from steelo.utilities.utils import normalize_name
@@ -568,6 +569,21 @@ def calculate_cost_breakdown(
     return {key: value / production for material, value_dict in breakdown.items() for key, value in value_dict.items()}
 
 
+@lru_cache(maxsize=128)
+def _warn_missing_opex_component(component: str, carriers: tuple[str, ...]) -> None:
+    """Keep a warning sample per component/carrier set instead of logging every candidate.
+
+    The bounded cache lives only in this Python process; it stores no model data.
+    """
+    logging.getLogger(f"{__name__}.calculate_variable_opex").warning(
+        "[VOPEX] %s cost is None despite data present "
+        "(non-positive total cost or missing product_volume). Carriers/materials: %s. "
+        "Repeated warnings for this combination are suppressed in this process.",
+        component,
+        carriers,
+    )
+
+
 def calculate_variable_opex(materials_cost_data: dict, energy_cost_data: dict) -> float:
     """
     Calculate the total variable operating expenditure (OPEX) by combining material and energy costs.
@@ -695,19 +711,11 @@ def calculate_variable_opex(materials_cost_data: dict, energy_cost_data: dict) -
     # Calculate energy cost as total cost / total output
     energy_unit_cost = calculate_energy_total(energy_cost_data)
 
-    # Warn when cost component is None despite data being present
+    # Preserve a diagnostic sample without flooding logs in candidate/year loops.
     if energy_unit_cost is None and energy_cost_data:
-        logger.warning(
-            "[VOPEX] Energy cost is None despite energy data present "
-            "(total_energy_cost <= 0 or no product_volume). Carriers: %s",
-            list(energy_cost_data.keys()),
-        )
+        _warn_missing_opex_component("Energy", tuple(sorted(energy_cost_data)))
     if material_unit_cost is None and materials_cost_data:
-        logger.warning(
-            "[VOPEX] Material cost is None despite material data present "
-            "(total_material_cost <= 0 or no product_volume). Materials: %s",
-            list(materials_cost_data.keys()),
-        )
+        _warn_missing_opex_component("Material", tuple(sorted(materials_cost_data)))
 
     # Log VOPEX component summary
     logger.debug(

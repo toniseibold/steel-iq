@@ -10,52 +10,11 @@ from pathlib import Path
 import pandas as pd
 import pycountry
 
+from .analysis_scope import EUROPE_ANALYSIS_DESCRIPTION, EUROPE_ANALYSIS_ISO3
+
 
 _LOCATION_VALUE = re.compile(r"(?P<key>iso3|country)=(?P<value>'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\")")
 _YEAR = re.compile(r"steel_trade_allocations_(\d{4})\.csv$")
-# Some demand countries have no furnace and are therefore absent from the
-# post-processed plant table. This is the model's European output region.
-_EUROPE_FALLBACK = {
-    "ALB",
-    "AUT",
-    "BEL",
-    "BGR",
-    "BIH",
-    "CHE",
-    "CYP",
-    "CZE",
-    "DEU",
-    "DNK",
-    "ESP",
-    "EST",
-    "FIN",
-    "FRA",
-    "GBR",
-    "GRC",
-    "HRV",
-    "HUN",
-    "IRL",
-    "ISL",
-    "ITA",
-    "LIE",
-    "LTU",
-    "LUX",
-    "LVA",
-    "MDA",
-    "MKD",
-    "MLT",
-    "MNE",
-    "NLD",
-    "NOR",
-    "POL",
-    "PRT",
-    "ROU",
-    "SRB",
-    "SVK",
-    "SVN",
-    "SWE",
-    "UKR",
-}
 
 
 def _location_iso3(value: object) -> str:
@@ -77,20 +36,13 @@ def _location_iso3(value: object) -> str:
 
 
 def _europe_iso3(run_dir: Path) -> set[str]:
-    plant_files = sorted(run_dir.glob("post_processed_*.csv"), key=lambda path: path.stat().st_mtime)
-    if not plant_files:
-        raise FileNotFoundError(f"No post_processed_*.csv found in {run_dir}")
-    geography = pd.read_csv(plant_files[-1], usecols=["iso3", "region"]).drop_duplicates()
-    return _EUROPE_FALLBACK | set(
-        geography.loc[geography["region"].astype(str).str.casefold() == "europe", "iso3"]
-        .dropna()
-        .astype(str)
-        .str.upper()
-    )
+    """Return the fixed comparison scope; ``run_dir`` is retained for API compatibility."""
+    _ = run_dir
+    return set(EUROPE_ANALYSIS_ISO3)
 
 
 def summarise_europe_trade_flows(run_dir: Path) -> pd.DataFrame:
-    """Return bilateral flows crossing Europe's external boundary.
+    f"""Return bilateral flows crossing the {EUROPE_ANALYSIS_DESCRIPTION} boundary.
 
     ``country_from`` and ``country_to`` are ISO3 country codes. Intra-European
     and wholly non-European flows are excluded.

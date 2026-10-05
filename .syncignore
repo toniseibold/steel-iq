@@ -38,3 +38,5 @@
 trade_lp_variables.csv
 *master_input_*.xlsx
 /master_input/
+/cluster/results*
+/live

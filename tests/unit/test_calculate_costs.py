@@ -1253,3 +1253,21 @@ def test_secondary_output_scalar_matches_breakdown_credits():
     # (100 t x -10 x 0.3 + 100 t x -10 x 0.2) / 200 t = -2.5 USD/t product
     assert scalar == pytest.approx(-2.5)
     assert credits == pytest.approx(scalar)
+
+
+def test_missing_opex_warnings_are_sampled_without_changing_costs(caplog):
+    import logging
+    from steelo.domain.calculate_costs import _warn_missing_opex_component, calculate_variable_opex
+
+    _warn_missing_opex_component.cache_clear()
+    try:
+        with caplog.at_level(logging.WARNING):
+            for _ in range(100):
+                assert calculate_variable_opex({"io_low": {}}, {}) == 0.0
+            assert calculate_variable_opex({"io_high": {}}, {}) == 0.0
+            assert calculate_variable_opex({}, {"electricity": {}}) == 0.0
+        samples = [r for r in caplog.records if "Repeated warnings" in r.getMessage()]
+        assert len(samples) == 3
+        assert all(r.levelno == logging.WARNING for r in samples)
+    finally:
+        _warn_missing_opex_component.cache_clear()

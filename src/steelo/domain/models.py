@@ -326,7 +326,7 @@ class Location:
                     self.iso3,
                 )
                 return lookup[self.geo_key]
-            logger.info(
+            logger.debug(
                 "%s: no sub-national value for %s; falling back to country %s.",
                 what,
                 self.geo_key,
@@ -2425,8 +2425,8 @@ class FurnaceGroup:
         logger = logging.getLogger(f"{__name__}.optimal_technology_name")
 
         # Log initial furnace group state
-        logger.info(f"[OPTIMAL TECH] Starting technology evaluation for FurnaceGroup {self.furnace_group_id}")
-        logger.info(
+        logger.debug(f"[OPTIMAL TECH] Starting technology evaluation for FurnaceGroup {self.furnace_group_id}")
+        logger.debug(
             f"[OPTIMAL TECH] Current technology: {self.technology.name}, "
             f"Capacity: {self.capacity * T_TO_KT:,.0f} kt, Utilization: {self.utilization_rate:.1%}"
         )
@@ -2537,12 +2537,12 @@ class FurnaceGroup:
 
         # Check if current technology has any allowed transitions defined
         if self.technology.name not in allowed_furnace_transitions:
-            logger.info(f"[OPTIMAL TECH] NO TRANSITIONS ALLOWED - {self.technology.name} has no defined transitions")
-            logger.info("[OPTIMAL TECH] Returning empty results - no technology switch possible")
-            logger.info("[OPTIMAL TECH] NPV dict: {}")
-            logger.info(f"[OPTIMAL TECH] NPV capex dict: {npv_capex_dict}")
-            logger.info("[OPTIMAL TECH] COSA: None")
-            logger.info(f"[OPTIMAL TECH] BOM dict: {bom_dict}")
+            logger.debug(f"[OPTIMAL TECH] NO TRANSITIONS ALLOWED - {self.technology.name} has no defined transitions")
+            logger.debug("[OPTIMAL TECH] Returning empty results - no technology switch possible")
+            logger.debug("[OPTIMAL TECH] NPV dict: {}")
+            logger.debug(f"[OPTIMAL TECH] NPV capex dict: {npv_capex_dict}")
+            logger.debug("[OPTIMAL TECH] COSA: None")
+            logger.debug(f"[OPTIMAL TECH] BOM dict: {bom_dict}")
             return {}, npv_capex_dict, None, bom_dict, reductant_dict
 
         # ========== STAGE 6: Evaluate Each Allowed Technology Transition ==========
@@ -2552,16 +2552,16 @@ class FurnaceGroup:
         )
 
         for tech in allowed_furnace_transitions[self.technology.name]:
-            logger.info(f"[OPTIMAL TECH] ===== Evaluating transition to {tech} =====")
+            logger.debug(f"[OPTIMAL TECH] ===== Evaluating transition to {tech} =====")
 
             # Skip if technology lacks capex data
             if tech not in capex_dict:
-                logger.info(f"[OPTIMAL TECH] SKIPPING {tech} - No capex data available")
+                logger.debug(f"[OPTIMAL TECH] SKIPPING {tech} - No capex data available")
                 continue
 
             # BOF requires smelter furnace (for pig iron production)
             if tech == "BOF" and not self.has_hot_metal_access:
-                logger.info("[OPTIMAL TECH] SKIPPING BOF - Plant has no smelter furnace (required for BOF)")
+                logger.debug("[OPTIMAL TECH] SKIPPING BOF - Plant has no smelter furnace (required for BOF)")
                 continue
 
             # The capacity policy may have shrunk this candidate; everything downstream —
@@ -6188,17 +6188,17 @@ class PlantGroup:
 
             # Check if expansion would exceed limit
             if expansion_and_switch_capacity + build_capacity > expansion_limit:
-                logger.warning("[PG EXPANSION] === Stage 8: Capacity limit EXCEEDED ===")
-                logger.warning(f"[PG EXPANSION]   - Product: {expansion_product}")
-                logger.warning(
+                logger.debug("[PG EXPANSION] === Stage 8: Capacity limit EXCEEDED ===")
+                logger.debug(f"[PG EXPANSION]   - Product: {expansion_product}")
+                logger.debug(
                     f"[PG EXPANSION]   - Current expansion/switch capacity: {expansion_and_switch_capacity * T_TO_KT:,.0f} kt"
                 )
-                logger.warning(f"[PG EXPANSION]   - New expansion capacity: {build_capacity * T_TO_KT:,.0f} kt")
-                logger.warning(
+                logger.debug(f"[PG EXPANSION]   - New expansion capacity: {build_capacity * T_TO_KT:,.0f} kt")
+                logger.debug(
                     f"[PG EXPANSION]   - Total after expansion: {(expansion_and_switch_capacity + build_capacity) * T_TO_KT:,.0f} kt"
                 )
-                logger.warning(f"[PG EXPANSION]   - Limit: {expansion_limit * T_TO_KT:,.0f} kt")
-                logger.warning("[PG EXPANSION]   - DECISION - No expansion (capacity limit reached)")
+                logger.debug(f"[PG EXPANSION]   - Limit: {expansion_limit * T_TO_KT:,.0f} kt")
+                logger.debug("[PG EXPANSION]   - DECISION - No expansion (capacity limit reached)")
                 return None
 
             # logger.debug("[PG EXPANSION] === Stage 8: Capacity limit check PASSED ===")
@@ -10622,14 +10622,16 @@ class Environment:
             # Store on the instance
             self.allowed_furnace_transitions[origin] = allowed
 
-    def get_cached_distance(self, from_pc_name: str, to_pc_name: str, process_centers: list | None = None) -> float:
+    def get_cached_distance(
+        self, from_pc_name: str, to_pc_name: str, process_centers: list | dict | None = None
+    ) -> float:
         """
         Get cached distance between two process centers.
 
         Args:
             from_pc_name: Source process center name
             to_pc_name: Destination process center name
-            process_centers: Optional list of ProcessCenter objects for fallback computation
+            process_centers: Optional list or name-indexed dictionary of ProcessCenter objects
 
         Returns:
             Distance in km, or float('inf') if not computable
@@ -10647,9 +10649,14 @@ class Environment:
         if process_centers is None:
             return float("inf")  # Can't compute without data
 
-        # Find process centers (still O(n) but only on cache miss)
-        from_pc = next((pc for pc in process_centers if pc.name == from_pc_name), None)
-        to_pc = next((pc for pc in process_centers if pc.name == to_pc_name), None)
+        # Bulk callers build this index once, avoiding two full-list scans per
+        # pair (millions of pairs in the hot-metal radius check).
+        if isinstance(process_centers, dict):
+            from_pc = process_centers.get(from_pc_name)
+            to_pc = process_centers.get(to_pc_name)
+        else:
+            from_pc = next((pc for pc in process_centers if pc.name == from_pc_name), None)
+            to_pc = next((pc for pc in process_centers if pc.name == to_pc_name), None)
 
         if from_pc is None or to_pc is None:
             distance = float("inf")
@@ -10666,7 +10673,7 @@ class Environment:
         """
         Build a distance lookup function for TradeLPModel.
 
-        This creates a closure that captures the process_centers list
+        This creates a closure that captures a process-center name index
         and can compute/cache distances as needed.
 
         Args:
@@ -10676,8 +10683,11 @@ class Environment:
             Callable[[str, str], float] that returns distances
         """
 
+        # Preserve the existing first-match behavior if names are duplicated.
+        by_name = {pc.name: pc for pc in reversed(process_centers)}
+
         def distance_lookup(from_pc_name: str, to_pc_name: str) -> float:
-            return self.get_cached_distance(from_pc_name, to_pc_name, process_centers)
+            return self.get_cached_distance(from_pc_name, to_pc_name, by_name)
 
         return distance_lookup
 
@@ -10710,10 +10720,11 @@ class Environment:
         logger = logging.getLogger(f"{__name__}.Environment")
 
         within_radius = set()
+        by_name = {pc.name: pc for pc in reversed(process_centers)}
 
         for from_pc in process_centers:
             for to_pc in process_centers:
-                distance = self.get_cached_distance(from_pc.name, to_pc.name, process_centers=process_centers)
+                distance = self.get_cached_distance(from_pc.name, to_pc.name, process_centers=by_name)
                 if distance <= hot_metal_radius:
                     within_radius.add((from_pc.name, to_pc.name))
 

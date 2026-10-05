@@ -52,6 +52,7 @@ dependencies = [
     "httpx",
     "tqdm",
     "dask[array,distributed]>=2025.5.0",
+    "ipykernel>=7.1.0",
 ]
 [build-system]
 requires = ["hatchling"]
@@ -116,6 +117,11 @@ run_baseload_power_simulation = "steelo.entrypoints.geo:run_baseload_power_simul
 analyse-regional-trade="steelo.adapters.dataprocessing.postprocessing.regional_trade_analysis:main"
 summarise-europe-trade="steelo.adapters.dataprocessing.postprocessing.europe_trade_summary:main"
 analyse-regional-emissions-price="steelo.adapters.dataprocessing.postprocessing.regional_emissions_price_analysis:main"
+plot-greenfield-plant-map="steelo.adapters.dataprocessing.postprocessing.greenfield_plant_map:main"
+analyse-production-cost-emissions="steelo.adapters.dataprocessing.postprocessing.production_cost_emissions_matrix:main"
+analyse-emissions-subsidies="steelo.adapters.dataprocessing.postprocessing.emissions_subsidy_timeseries:main"
+analyse-world-scenarios="steelo.adapters.dataprocessing.postprocessing.world_scenario_analysis:main"
+analyse-europe-scenarios="steelo.adapters.dataprocessing.postprocessing.europe_scenario_post_analysis:main"
 
 [tool.pytest.ini_options]
 addopts = "-ra"

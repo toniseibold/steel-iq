@@ -24,6 +24,8 @@ import pandas as pd
 from matplotlib.offsetbox import AnnotationBbox, DrawingArea
 from matplotlib.patches import FancyArrowPatch, Patch, Wedge
 
+from .route_classification import TECHNOLOGY_ROUTE_COLOURS, source_route_lookup
+
 
 EUROPE = "Europe"
 GERMANY = "DEU"
@@ -356,13 +358,8 @@ def _is_europe(region: object) -> bool:
 def _technology_lookup(plants: pd.DataFrame, year: int) -> dict[str, str]:
     if plants.empty or "furnace_group_id" not in plants or "technology" not in plants:
         return {}
-    selected = plants
-    if "year" in selected:
-        selected = selected[pd.to_numeric(selected["year"], errors="coerce") == year]
-    return {
-        _clean_text(row.furnace_group_id): _clean_text(row.technology) or UNKNOWN_TECH
-        for row in selected[["furnace_group_id", "technology"]].drop_duplicates("furnace_group_id").itertuples()
-    }
+    routes = source_route_lookup(plants, year)
+    return dict(zip(routes["furnace_group_id"], routes["technology_route"]))
 
 
 def _prepare_trade(
@@ -453,6 +450,10 @@ def _production_by_country(plants: pd.DataFrame, year: int, commodity: str) -> p
     selected["volume"] = pd.to_numeric(selected["production"], errors="coerce").fillna(0.0)
     if "region" not in selected:
         selected["region"] = ""
+    if "chosen_reductant" not in selected:
+        selected["chosen_reductant"] = ""
+    routes = source_route_lookup(selected, year).set_index("furnace_group_id")["technology_route"]
+    selected["technology"] = selected["furnace_group_id"].astype(str).map(routes).fillna(UNKNOWN_TECH)
     return selected[["iso3", "region", "technology", "volume"]]
 
 
@@ -524,7 +525,7 @@ def _representative_positions(
 def _technology_colors(technologies: Iterable[str]) -> dict[str, tuple[float, float, float, float]]:
     names = sorted({_clean_text(name) or UNKNOWN_TECH for name in technologies})
     cmap = plt.get_cmap("tab20")
-    return {name: cmap(index % 20) for index, name in enumerate(names)}
+    return {name: TECHNOLOGY_ROUTE_COLOURS.get(name, cmap(index % 20)) for index, name in enumerate(names)}
 
 
 def _add_half_pie(

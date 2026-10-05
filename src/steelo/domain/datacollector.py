@@ -1282,6 +1282,8 @@ class DataCollector:
                 "plant_group_id": plant_group_id,
                 "location": p.location.iso3,
                 "geo_key": p.location.geo_key,
+                "latitude": p.location.lat,
+                "longitude": p.location.lon,
                 "plant_profit_and_loss": sum(fg.historic_balance for fg in p.furnace_groups),
                 "plant_group_balance": plant_group_balance,
             }

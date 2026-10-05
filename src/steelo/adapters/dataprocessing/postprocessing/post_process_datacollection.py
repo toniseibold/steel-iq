@@ -218,11 +218,21 @@ def extract_and_process_stored_dataCollection(
                 for col in carbon_breakdown_columns:
                     full_furnace_df[col] = None
         full_furnace_df["plant_id"] = full_furnace_df["furnace_group_id"].apply(lambda x: x.split("_")[0])
-        plant_cols = ["location", "plant_profit_and_loss", "plant_group_id", "plant_group_balance"]
-        if "geo_key" in df.columns:
-            plant_cols.append("geo_key")
+        plant_columns = [
+            column
+            for column in (
+                "location",
+                "geo_key",
+                "latitude",
+                "longitude",
+                "plant_profit_and_loss",
+                "plant_group_id",
+                "plant_group_balance",
+            )
+            if column in df.columns
+        ]
         full_furnace_df = (
-            df[plant_cols]
+            df[plant_columns]
             .reset_index()
             .rename(columns={"index": "plant_id"})
             .merge(full_furnace_df, on="plant_id", how="right")
@@ -363,6 +373,8 @@ def extract_and_process_stored_dataCollection(
         "country",
         "iso3",
         "geo_key",
+        "latitude",
+        "longitude",
         "plant_group_id",
         "plant_group_balance",
         "plant_id",
@@ -397,6 +409,8 @@ def extract_and_process_stored_dataCollection(
             "region",
             "country",
             "iso3",
+            "latitude",
+            "longitude",
             "plant_group_id",
             "plant_id",
             "furnace_group_id",

@@ -21,6 +21,7 @@ def test_summarise_europe_trade_by_year_and_commodity(tmp_path: Path):
         [
             {"iso3": "DEU", "region": "Europe"},
             {"iso3": "FRA", "region": "Europe"},
+            {"iso3": "SRB", "region": "Europe"},
             {"iso3": "USA", "region": "North America"},
         ]
     ).to_csv(run_dir / "post_processed_test.csv", index=False)
@@ -45,12 +46,18 @@ def test_summarise_europe_trade_by_year_and_commodity(tmp_path: Path):
                 "allocated_volume": 99.0,
             },
             {
+                "commodity": "steel",
+                "source_location": _location("SRB"),
+                "destination_location": _location("DEU"),
+                "allocated_volume": 5.0,
+            },
+            {
                 "commodity": "scrap",
                 "source_location": _location("USA"),
                 "destination_location": _location("FRA"),
                 "allocated_volume": 7.0,
             },
-            # Cyprus has no furnace row, but still belongs to the model's Europe region.
+            # Cyprus has no furnace row, but is still part of the fixed analysis scope.
             {
                 "commodity": "scrap",
                 "source_location": _location("USA"),
@@ -62,9 +69,9 @@ def test_summarise_europe_trade_by_year_and_commodity(tmp_path: Path):
 
     result = summarise_europe_trade(run_dir).set_index(["year", "commodity"])
 
-    assert result.loc[(2030, "steel"), "imports"] == pytest.approx(10.0)
+    assert result.loc[(2030, "steel"), "imports"] == pytest.approx(15.0)
     assert result.loc[(2030, "steel"), "exports"] == pytest.approx(4.0)
-    assert result.loc[(2030, "steel"), "net_imports"] == pytest.approx(6.0)
+    assert result.loc[(2030, "steel"), "net_imports"] == pytest.approx(11.0)
     assert result.loc[(2030, "scrap"), "imports"] == pytest.approx(10.0)
     assert result.loc[(2030, "scrap"), "exports"] == pytest.approx(0.0)
 
@@ -72,6 +79,7 @@ def test_summarise_europe_trade_by_year_and_commodity(tmp_path: Path):
     steel = flows[flows["commodity"].eq("steel")].set_index(["country_from", "country_to"])
     assert steel.loc[("USA", "DEU"), "direction"] == "import"
     assert steel.loc[("USA", "DEU"), "volume"] == pytest.approx(10.0)
+    assert steel.loc[("SRB", "DEU"), "direction"] == "import"
     assert steel.loc[("DEU", "USA"), "direction"] == "export"
     assert steel.loc[("DEU", "USA"), "volume"] == pytest.approx(4.0)
     assert ("DEU", "FRA") not in steel.index

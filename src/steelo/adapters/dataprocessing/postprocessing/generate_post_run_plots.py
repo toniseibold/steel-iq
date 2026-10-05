@@ -4,6 +4,7 @@ import pandas as pd
 from typing import Optional, TYPE_CHECKING
 
 from steelo.domain.constants import T_TO_KT, T_TO_MT
+from .route_classification import technology_route_label
 
 # from steelo.utilities.plotting import plot_added_capacity_by_technology  # superseded by stacked variant
 from steelo.utilities.steeliq_plotter import SteelPlotter, PlotConfig
@@ -58,6 +59,11 @@ def generate_post_run_cap_prod_plots(
     output_df = pd.read_csv(file_path)
     output_df = output_df.copy()
     output_df = output_df.sort_values(by="year").reset_index(drop=True)
+    if "chosen_reductant" in output_df:
+        output_df["technology"] = [
+            technology_route_label(technology, reductant)
+            for technology, reductant in zip(output_df["technology"], output_df["chosen_reductant"])
+        ]
 
     # Check order of magnitude and convert if needed for better readability
     # If values are in millions (tonnes), convert to kt for better readability
