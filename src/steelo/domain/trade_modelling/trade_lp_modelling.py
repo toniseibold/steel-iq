@@ -1,3 +1,4 @@
+from collections import Counter
 from enum import Enum
 from steelo.domain.models import Location
 import pyomo.environ as pyo
@@ -7,6 +8,7 @@ from typing import Tuple, Any
 import logging
 import os
 import time
+from pathlib import Path
 import functools
 from steelo.adapters.geospatial.geospatial_toolbox import haversine_distance
 
@@ -201,7 +203,13 @@ class ProcessCenter:
         process: Process definition specifying technology and bill of materials
         capacity: Maximum throughput (tons/year)
         location: Geographic location (for distance calculations)
-        production_cost: Cost per ton to operate this facility (e.g., carbon cost)
+        production_cost: Cost per ton to operate this facility; for producers the own-stage carbon
+            cost in USD/t, for suppliers the raw-material price
+        emission_intensity: Own-stage direct emissions in tCO2 per tonne of product (producers only)
+        upstream_emission_intensity: Direct emissions embedded in last year's inputs, tCO2 per tonne
+            of product
+        upstream_carbon_cost_paid: Carbon cost already paid on last year's inputs, USD per tonne of
+            product
         soft_minimum_capacity: Optional target minimum utilization (fraction, e.g., 0.5 for 50%)
         optimal_production: Set after solving, the optimal production quantity
     """
@@ -215,12 +223,18 @@ class ProcessCenter:
         production_cost: float = 0.0,
         soft_minimum_capacity: float | None = None,
         energy_costs_per_input: dict[str, float] | None = None,
+        emission_intensity: float = 0.0,
+        upstream_emission_intensity: float = 0.0,
+        upstream_carbon_cost_paid: float = 0.0,
     ):
         self.name = name
         self.process = process
         self.capacity = capacity
         self.location = location
         self.production_cost = production_cost
+        self.emission_intensity = emission_intensity
+        self.upstream_emission_intensity = upstream_emission_intensity
+        self.upstream_carbon_cost_paid = upstream_carbon_cost_paid
         self.soft_minimum_capacity = soft_minimum_capacity
         self.optimal_production: float | None = None
         # Facility-specific energy cost per ton of input, keyed by commodity name. Overrides
@@ -264,6 +278,8 @@ class Allocations:
         allocation_costs: Optional dict mapping (from, to, commodity) → total cost
         tariff_taxes: Optional dict mapping (from_iso3, to_iso3, commodity) → tariff cost per unit.
             Passed through to TM_PAM_connector so tariffs can be propagated into BOM material costs.
+        carbon_border_charges: Optional dict mapping (from, to, commodity) → carbon border adjustment in
+            USD/t for the arcs that carry one (negative = export rebate); booked like tariffs downstream.
     """
 
     def __init__(
@@ -271,10 +287,12 @@ class Allocations:
         allocations: dict[Tuple[ProcessCenter, ProcessCenter, Commodity], float],
         allocation_costs: dict[Tuple[ProcessCenter, ProcessCenter, Commodity], float] | None = None,
         tariff_taxes: dict[tuple[str, str, str], float] | None = None,
+        carbon_border_charges: dict[Tuple[ProcessCenter, ProcessCenter, Commodity], float] | None = None,
     ):
         self.allocations = allocations
         self.allocation_costs = allocation_costs
         self.tariff_taxes = tariff_taxes
+        self.carbon_border_charges = carbon_border_charges
 
     def get_allocation(
         self, from_processcenter: ProcessCenter, to_processcenter: ProcessCenter, commodity: Commodity
@@ -427,6 +445,19 @@ class TradeLPModel:
         # Gurobi barrier does not consume these primal-only values.
         self.previous_solution: dict[tuple[str, str, str], float] | None = None
 
+        # Where to write the LP (MPS) when the solve does not end optimal, for offline reproduction
+        self.failure_dump_path: Path | None = None
+        # Retried cold in order on a non-optimal solve; in HiGHS 1.15 "ipm" is HiPO again, legacy IPM is "ipx".
+        self.fallback_solvers: list[str] = ["ipx", "simplex"]
+        # Looser tolerances applied only to the fallback retries, so a hard year still gets a solution;
+        # the primary solve keeps HiGHS's default (~1e-7) tolerances and results stay comparable across runs.
+        self.fallback_solver_options: dict[str, Any] = {
+            "ipm_optimality_tolerance": 1e-3,
+            "primal_feasibility_tolerance": 1e-3,
+            "dual_feasibility_tolerance": 1e-3,
+            "kkt_tolerance": 1e-3,
+        }
+
     def add_transportation_costs(self, transportation_costs: list[TransportationCost]) -> None:
         """Add transportation costs to the model."""
         self.transportation_costs.extend(transportation_costs)
@@ -505,7 +536,12 @@ class TradeLPModel:
 
     def add_processes(self, processes: list[Process]):
         logger = logging.getLogger(f"{__name__}.add_processes")
+        registered_names = {proc.name for proc in self.processes}
         for proc in processes:
+            # A process registered twice duplicates every legal allocation built from it.
+            if proc.name in registered_names:
+                raise ValueError(f"Process '{proc.name}' is already registered in the trade LP model")
+            registered_names.add(proc.name)
             if not proc.products == []:
                 for product in proc.products:
                     if product not in self.commodities and product is not None:
@@ -514,6 +550,12 @@ class TradeLPModel:
         self.processes = self.processes + processes
 
     def add_process_centers(self, process_centers: list[ProcessCenter]):
+        registered_names = {pc.name for pc in self.process_centers}
+        for pc in process_centers:
+            # A centre registered twice doubles its capacity and every constraint sum over its arcs.
+            if pc.name in registered_names:
+                raise ValueError(f"Process centre '{pc.name}' is already registered in the trade LP model")
+            registered_names.add(pc.name)
         self.process_centers = self.process_centers + process_centers
         self._pc_by_name = None  # Invalidate lookup cache
 
@@ -675,6 +717,14 @@ class TradeLPModel:
                 for commodity in from_pc.process.products:
                     if commodity is not None and commodity in dep_commodities:
                         legal_allocations.append((from_pc, to_pc, commodity))
+
+        # A repeated arc key is counted twice by every list-based constraint sum (caps, quotas).
+        arc_key_counts = Counter(
+            (from_pc.name, to_pc.name, commodity.name) for from_pc, to_pc, commodity in legal_allocations
+        )
+        duplicates = sorted(key for key, count in arc_key_counts.items() if count > 1)
+        if duplicates:
+            raise ValueError(f"Duplicate legal allocation keys in the trade LP model: {duplicates[:10]}")
 
         self.legal_allocations = legal_allocations
 
@@ -991,6 +1041,7 @@ class TradeLPModel:
         """Add the allocation costs as parameters to the LP model. Needed for the objective function."""
         logger = logging.getLogger(f"{__name__}.add_allocation_costs_as_parameters_to_lp")
         self.lp_model.allocation_costs = {}
+        self.lp_model.carbon_border_charge = {}
         for from_pc, to_pc, commodity in self.legal_allocations:
             # Get location-specific transportation cost
             transportation_cost = self.get_transportation_cost(
@@ -1673,7 +1724,13 @@ class TradeLPModel:
             self.lp_model.process_center_type[pc.name] = pc.process.type.value
 
     def build_lp_model(
-        self, willingness_to_pay_list=None, carbon_border_mechanisms=None, country_mappings=None, year=None
+        self,
+        willingness_to_pay_list=None,
+        carbon_border_mechanisms=None,
+        country_mappings=None,
+        year=None,
+        destination_prices=None,
+        carbon_border_export_rebates=False,
     ):
         """Build the complete Pyomo LP model with all variables, parameters, and constraints.
 
@@ -1686,6 +1743,8 @@ class TradeLPModel:
             carbon_border_mechanisms: List of CarbonBorderMechanism objects (optional, defaults to None)
             country_mappings: Dictionary mapping ISO3 codes to CountryMapping objects (optional, defaults to None)
             year: Current simulation year for mechanism activation check (optional, defaults to None)
+            destination_prices: ISO3 -> carbon price each border is priced at (optional, defaults to None)
+            carbon_border_export_rebates: Also rebate exports leaving a carbon-border region (defaults to False)
 
         Steps:
             1. Determine legal allocations (valid flows based on process connectors)
@@ -1745,6 +1804,8 @@ class TradeLPModel:
                 carbon_border_mechanisms=carbon_border_mechanisms,
                 country_mappings=country_mappings,
                 year=year,
+                destination_prices=destination_prices if destination_prices is not None else {},
+                export_rebates=carbon_border_export_rebates,
             )
         # Add objective function:
         self.add_objective_function_to_lp()
@@ -1761,7 +1822,7 @@ class TradeLPModel:
                 - solver.termination_condition: Why solver stopped (optimal, infeasible, etc.)
 
         Notes:
-            - Uses the barrier method by default
+            - Uses the Gurobi barrier method configured for the cluster branch
             - Does not warm-start because no LP basis or dual start is retained
             - Random seed from SimulationConfig.random_seed for reproducibility
             - Does not automatically load solution (call extract_solution() after)
@@ -1830,6 +1891,68 @@ class TradeLPModel:
 
         return result
 
+    def _run_solver(
+        self, solver_name: str, warm_start: bool, logger: logging.Logger, relaxed_tolerances: bool = False
+    ) -> tuple[Any, Any]:
+        """Solve the built LP with a fresh HiGHS instance running the given algorithm.
+
+        Args:
+            solver_name: HiGHS `solver` option value (hipo, ipx or simplex)
+            warm_start: Pass the variable values already set on the model as a starting basis (simplex only)
+            logger: Logger for the timing line
+            relaxed_tolerances: Apply fallback_solver_options on top of solver_options (fallback retries only)
+
+        Returns:
+            Tuple of (appsi solver instance, Pyomo result object)
+        """
+        start_time = time.time()
+        solver = pyo.SolverFactory("appsi_highs")
+        solver.options["random_seed"] = self.random_seed
+        solver.options.update(self.solver_options)
+        solver.options["solver"] = solver_name
+        if relaxed_tolerances:
+            solver.options.update(self.fallback_solver_options)
+            logger.warning(
+                f"operation=trade_optimization solver={solver_name} relaxed_tolerances={self.fallback_solver_options}"
+            )
+        solver.config.load_solution = False  # Don't try to load infeasible solution
+        # HiGHS's log reaches the run log via the pyomo appsi logger; tee=True also mirrors it to stdout.
+        highs_log = os.environ.get("STEELO_HIGHS_LOG", "").lower() in {"1", "true", "yes"}
+        result = solver.solve(self.lp_model, load_solutions=False, warmstart=warm_start, tee=highs_log)
+        logger.info(f"operation=trade_optimization duration_s={time.time() - start_time:.3f} solver={solver_name}")
+        return solver, result
+
+    def _log_solver_failure(self, solver, termination_condition, logger: logging.Logger, dump_lp: bool) -> None:
+        """Log HiGHS's own account of a non-optimal solve and optionally dump the LP for offline reproduction.
+
+        Args:
+            solver: The appsi_highs solver instance that just ran
+            termination_condition: Pyomo termination condition of the failed solve
+            logger: Logger to write the diagnostics to
+            dump_lp: Write the LP to failure_dump_path (the LP is identical across retries, so once is enough)
+
+        Notes:
+            - Pyomo folds HiGHS's load/model/presolve/solve/postsolve errors into a single
+              TerminationCondition.error; the raw HiGHS status and iteration counts are the
+              only way to tell a HiPO divergence from a crossover or postsolve failure.
+            - The MPS file (written only when failure_dump_path is set) lets the exact failing
+              LP be re-solved with highspy under different options without re-running the simulation.
+        """
+        highs = solver._solver_model  # appsi keeps the highspy.Highs handle here
+        info = highs.getInfo()
+        logger.error(
+            f"operation=trade_optimization termination={termination_condition} "
+            f"highs_status='{highs.modelStatusToString(highs.getModelStatus())}' "
+            f"ipm_iterations={info.ipm_iteration_count} crossover_iterations={info.crossover_iteration_count} "
+            f"simplex_iterations={info.simplex_iteration_count} "
+            f"primal_status='{highs.solutionStatusToString(info.primal_solution_status)}' "
+            f"dual_status='{highs.solutionStatusToString(info.dual_solution_status)}'"
+        )
+        if dump_lp and self.failure_dump_path is not None:
+            self.failure_dump_path.parent.mkdir(parents=True, exist_ok=True)
+            highs.writeModel(str(self.failure_dump_path))
+            logger.error(f"Failed LP written to {self.failure_dump_path} for offline reproduction")
+
     def extract_solution(self):
         """Extract optimal allocation values from solved LP model.
 
@@ -1851,6 +1974,7 @@ class TradeLPModel:
 
         allocations = {}
         allocation_costs = {}
+        carbon_border_charges = {}
         for (from_pc_name, to_pc_name, commodity_name), var in self.lp_model.allocation_variables.items():
             volume = pyo.value(var)
             if volume >= self.lp_epsilon:
@@ -1861,11 +1985,15 @@ class TradeLPModel:
                 allocation_costs[(from_pc, to_pc, comm)] = self.lp_model.allocation_costs[
                     from_pc_name, to_pc_name, commodity_name
                 ]
+                name_key = (from_pc_name, to_pc_name, commodity_name)
+                if name_key in self.lp_model.carbon_border_charge:
+                    carbon_border_charges[(from_pc, to_pc, comm)] = self.lp_model.carbon_border_charge[name_key]
 
         self.allocations = Allocations(
             allocations=allocations,
             allocation_costs=allocation_costs,
             tariff_taxes=dict(self.tariff_taxes_by_iso3) if self.tariff_taxes_by_iso3 else None,
+            carbon_border_charges=carbon_border_charges or None,
         )
         # self.allocations.validate_allocations()
 
