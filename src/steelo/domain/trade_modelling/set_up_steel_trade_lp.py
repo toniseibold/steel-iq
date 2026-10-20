@@ -1326,6 +1326,9 @@ def set_up_steel_trade_lp(
         destination_prices=destination_prices,
         carbon_border_export_rebates=config.carbon_border_export_rebates,
     )
+    from steelo.h2_dri_quota.policy import add_h2_dri_production_quota
+
+    add_h2_dri_production_quota(lp_model, message_bus, int(year), config)
     lp_model = fix_to_zero_allocations_where_distance_doesnt_match_commodity(
         trade_lp=lp_model, config=config, env=message_bus.env if hasattr(message_bus, "env") else None
     )

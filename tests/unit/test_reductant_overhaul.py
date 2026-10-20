@@ -514,6 +514,16 @@ def test_reductant_score_carbon_price_flips_pick():
     assert fg.chosen_reductant == "coal"
 
 
+def test_forced_reductant_keeps_policy_choice_and_refreshes_energy_cost():
+    fg = _make_scoring_fg({"coal": 1.0, "natural_gas": 2.0})
+
+    result = fg.generate_energy_vopex_by_reductant(forced_reductant="natural_gas")
+
+    assert fg.chosen_reductant == "natural_gas"
+    assert result == {"iron_ore": 20.0}
+    assert fg.energy_vopex_by_carrier == {"natural_gas": 20.0}
+
+
 def test_reductant_score_by_product_credit_flips_pick():
     """A by-product credit on the gas business case flips the pick without carbon."""
     fg = _make_scoring_fg({"coal": 1.0, "natural_gas": 1.2, "bf_gas": 15.0})

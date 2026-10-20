@@ -36,6 +36,15 @@ from steelo.domain.trade_modelling.set_up_steel_trade_lp import (
     solve_steel_trade_lp_and_return_commodity_allocations,
 )
 from steelo.logging_config import LoggingConfig
+from steelo.h2_dri_quota.policy import (
+    EU_EFTA_UK_ISO3,
+    export_h2_dri_merit_order,
+    force_eu_eaf_capacity,
+    force_h2_dri_capacity,
+    regional_steel_demand,
+    required_h2_dri_opportunity_count,
+    required_eu_eaf_opportunity_count,
+)
 from steelo.domain.trade_modelling.trade_lp_modelling import Allocations
 from steelo.service_layer.message_bus import MessageBus
 from steelo.utilities.file_output import export_carbon_border_charges_to_csv, export_commodity_allocations_to_csv
@@ -326,8 +335,19 @@ class GeospatialModel:
                 derive_geo_unit=derive_geo_unit_for_site,
                 probabilistic_agents=bus.env.config.probabilistic_agents,
                 increase_sizing_query=increase_sizing_hook(),
+                priority_dri_iso3=EU_EFTA_UK_ISO3,
+                minimum_priority_dri_opportunities=required_h2_dri_opportunity_count(bus),
+                h2_dri_quota_candidate_scope=bus.env.config.h2_dri_quota.candidate_scope,
+                minimum_priority_eaf_opportunities=required_eu_eaf_opportunity_count(bus),
+                h2_dri_merit_order_steel_demand_t=regional_steel_demand(bus, int(bus.env.year)),
+                h2_dri_merit_order_sink=lambda rows: export_h2_dri_merit_order(bus.env.config.output_dir, rows),
             )
         )
+        # A quota that begins in year T must start construction in T minus the
+        # configured construction time. The newly created opportunities above
+        # provide the current year's NPV-ranked candidate pool.
+        force_h2_dri_capacity(bus)
+        force_eu_eaf_capacity(bus)
         step_time = time.time() - step_start
         logger.info(f"operation=geo_identify_opportunities year={bus.env.year} duration_s={step_time:.3f}")
 
@@ -844,6 +864,16 @@ class PlantAgentsModel:
                     ):
                         logger.info(
                             f"[PAM] == Skipping FG {fg.furnace_group_id} - Tech: {fg.technology.name}, Capacity: {fg.capacity * T_TO_KT:,.0f} kt, Status: {fg.status}, Product: {fg.technology.product} ==\n"
+                        )
+                        continue
+
+                    quota_cfg = getattr(bus.env.config, "h2_dri_quota", None)
+                    if getattr(quota_cfg, "enabled", False) and getattr(fg, "h2_dri_quota_protected", False):
+                        logger.info(
+                            "[H2-DRI QUOTA] Protecting policy-backed FG %s from closure or technology switch "
+                            "in %s; commercial balances continue to be recorded",
+                            fg.furnace_group_id,
+                            bus.env.year,
                         )
                         continue
 

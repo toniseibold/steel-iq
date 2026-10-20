@@ -71,6 +71,31 @@ DEMAND_SHEET = "Demand and scrap availability"
 STEEL_DEMAND_METRIC = "crude steel consumption for forming [kt]"
 DEFAULT_MASTER_EXCEL = Path.home() / ".steelo" / "data_cache" / "master-input-v2.0.0" / "master_input_0.xlsx"
 
+# Tonnes of primary iron input required per tonne of liquid steel. These are
+# the metallic-input coefficients in the master workbook's Bill of Materials
+# (steel_bof/steel_eaf). DRI and HBI of the same grade use the same coefficient.
+IRON_TO_STEEL_REQUIREMENT = {
+    "hot_metal": 1.135120,
+    "pig_iron": 1.135120,
+    "dri_low": 1.455669,
+    "dri_mid": 1.235782,
+    "dri_high": 1.170923,
+    "hbi_low": 1.455669,
+    "hbi_mid": 1.235782,
+    "hbi_high": 1.170923,
+    "electrolytic_iron": 1.047573,
+    "liquid_iron": 1.047573,
+}
+
+# Ore requirements are only needed to split a DRI furnace's reported total
+# production when it uses more than one ore grade. The post-processed table
+# reports ore demand by grade but only one total production value per furnace.
+ORE_TO_DRI_REQUIREMENT = {
+    "io_low": 1.350382,
+    "io_mid": 1.376676,
+    "io_high": 1.357472,
+}
+
 
 @dataclass(frozen=True)
 class ScenarioInput:
@@ -164,22 +189,97 @@ def _steel_origin_by_year(plants_csv: Path) -> pd.DataFrame:
     return data
 
 
+def _iron_steel_equivalent_by_year(plants: pd.DataFrame) -> pd.DataFrame:
+    """Return physical iron and its liquid-steel equivalent by year.
+
+    BF, DRI+ESF, and SR production is treated as hot metal. MOE and E-WIN are
+    treated as electrolytic/liquid iron. For DRI routes, ore demand is used to
+    split production between low-, mid-, and high-grade DRI/HBI before applying
+    the grade-specific steelmaking yield. The DRI/HBI distinction does not
+    affect the result because both forms have the same coefficient by grade.
+    """
+    required = {"year", "furnace_group_id", "technology", "production", "feedstock", "demand"}
+    if missing := required - set(plants.columns):
+        raise ValueError(f"Iron-production data is missing columns: {', '.join(sorted(missing))}")
+
+    iron = plants.copy()
+    iron["technology"] = iron["technology"].fillna("").astype(str).str.strip().str.upper()
+    iron["feedstock"] = iron["feedstock"].fillna("").astype(str).str.strip().str.casefold()
+    iron["production"] = pd.to_numeric(iron["production"], errors="coerce").fillna(0.0)
+    iron["demand"] = pd.to_numeric(iron["demand"], errors="coerce").fillna(0.0).clip(lower=0.0)
+
+    furnaces = iron.drop_duplicates(["year", "furnace_group_id"])[
+        ["year", "furnace_group_id", "technology", "production"]
+    ].copy()
+    furnaces["steel_equivalent_factor"] = 1.0 / IRON_TO_STEEL_REQUIREMENT["hot_metal"]
+
+    electrolysis = furnaces["technology"].isin({"MOE", "E-WIN", "EWIN"})
+    furnaces.loc[electrolysis, "steel_equivalent_factor"] = 1.0 / IRON_TO_STEEL_REQUIREMENT["electrolytic_iron"]
+
+    furnaces["is_dri"] = furnaces["technology"].str.startswith("DRI") & ~furnaces["technology"].str.contains("ESF")
+    dri_ids = furnaces.loc[furnaces["is_dri"], ["year", "furnace_group_id"]]
+    if not dri_ids.empty:
+        ore = iron[iron["feedstock"].isin(ORE_TO_DRI_REQUIREMENT)].merge(
+            dri_ids, on=["year", "furnace_group_id"], how="inner"
+        )
+        if not ore.empty:
+            ore["estimated_iron_t"] = ore["demand"] / ore["feedstock"].map(ORE_TO_DRI_REQUIREMENT)
+            ore["steel_requirement"] = (
+                ore["feedstock"].str.removeprefix("io_").map(lambda grade: IRON_TO_STEEL_REQUIREMENT[f"dri_{grade}"])
+            )
+            ore["estimated_steel_t"] = ore["estimated_iron_t"] / ore["steel_requirement"]
+            grade_mix = ore.groupby(["year", "furnace_group_id"], as_index=False).agg(
+                estimated_iron_t=("estimated_iron_t", "sum"),
+                estimated_steel_t=("estimated_steel_t", "sum"),
+            )
+            grade_mix["steel_equivalent_factor"] = np.where(
+                grade_mix["estimated_iron_t"].gt(0),
+                grade_mix["estimated_steel_t"] / grade_mix["estimated_iron_t"],
+                1.0 / IRON_TO_STEEL_REQUIREMENT["dri_high"],
+            )
+            furnaces = furnaces.merge(
+                grade_mix[["year", "furnace_group_id", "steel_equivalent_factor"]],
+                on=["year", "furnace_group_id"],
+                how="left",
+                suffixes=("", "_dri"),
+            )
+            furnaces.loc[furnaces["is_dri"], "steel_equivalent_factor"] = furnaces.loc[
+                furnaces["is_dri"], "steel_equivalent_factor_dri"
+            ].fillna(1.0 / IRON_TO_STEEL_REQUIREMENT["dri_high"])
+            furnaces = furnaces.drop(columns="steel_equivalent_factor_dri")
+        else:
+            furnaces.loc[furnaces["is_dri"], "steel_equivalent_factor"] = 1.0 / IRON_TO_STEEL_REQUIREMENT["dri_high"]
+
+    furnaces["iron_steel_equivalent"] = furnaces["production"] * furnaces["steel_equivalent_factor"]
+    return furnaces.groupby("year", as_index=False).agg(
+        iron_production_t=("production", "sum"),
+        iron_steel_equivalent_t=("iron_steel_equivalent", "sum"),
+    )
+
+
 def load_production_matrix(
     scenarios: Iterable[ScenarioInput], years: Iterable[int], *, include_ukraine: bool = False
 ) -> pd.DataFrame:
-    """Return European iron, total steel, primary steel, and secondary steel production."""
+    """Return European iron and steel production, including iron's steel equivalent."""
     years = tuple(int(year) for year in years)
     records: list[dict[str, object]] = []
     for scenario in scenarios:
         europe = _europe_iso3(scenario, include_ukraine)
-        iron_columns = ["year", "iso3", "furnace_group_id", "product", "production"]
+        iron_columns = [
+            "year",
+            "iso3",
+            "furnace_group_id",
+            "technology",
+            "product",
+            "production",
+            "feedstock",
+            "demand",
+        ]
         iron = pd.read_csv(scenario.plants_csv, usecols=iron_columns, low_memory=False)
-        iron = iron.drop_duplicates(["year", "furnace_group_id"])
         iron = iron[
             iron["iso3"].astype(str).str.upper().isin(europe) & iron["product"].astype(str).str.casefold().eq("iron")
         ].copy()
-        iron["production"] = pd.to_numeric(iron["production"], errors="coerce").fillna(0.0)
-        iron = iron.groupby("year")["production"].sum() / 1e6
+        iron = _iron_steel_equivalent_by_year(iron).set_index("year") / 1e6
         origin = _steel_origin_by_year(scenario.plants_csv)
         origin = origin[origin["iso3"].astype(str).str.upper().isin(europe)]
         origin = origin.groupby("year", as_index=True)[["steel_primary_mt", "steel_secondary_mt"]].sum()
@@ -195,7 +295,8 @@ def load_production_matrix(
                     "year": year,
                     "x": X_LABELS[scenario.index % 4],
                     "y": Y_LABELS[scenario.index // 4],
-                    "iron_production_mt": float(iron.get(year, 0.0)),
+                    "iron_production_mt": float(iron["iron_production_t"].get(year, 0.0)),
+                    "iron_steel_equivalent_mt": float(iron["iron_steel_equivalent_t"].get(year, 0.0)),
                     "steel_production_mt": primary + secondary,
                     "steel_primary_mt": primary,
                     "steel_secondary_mt": secondary,
@@ -272,13 +373,20 @@ def calculate_primary_iron_self_sufficiency(
     production: pd.DataFrame,
     steel_demand: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Calculate primary-iron production as a share of total regional steel demand.
+    """Calculate the steel-equivalent of primary iron as a share of steel demand.
 
     ``primary_iron_self_sufficiency_pct`` is bounded to the requested 0--100%
     interpretation. ``primary_iron_to_demand_ratio`` remains uncapped so export
-    surpluses are not hidden in the accompanying CSV.
+    surpluses are not hidden in the accompanying CSV. Iron production is first
+    adjusted for the route-specific tonnes of iron needed per tonne of steel.
     """
-    production_columns = ["scenario_index", "scenario_title", "year", "iron_production_mt"]
+    production_columns = [
+        "scenario_index",
+        "scenario_title",
+        "year",
+        "iron_production_mt",
+        "iron_steel_equivalent_mt",
+    ]
     if missing := set(production_columns) - set(production.columns):
         raise ValueError(f"Production data is missing columns: {', '.join(sorted(missing))}")
     if missing := {"year", "steel_demand_mt"} - set(steel_demand.columns):
@@ -289,7 +397,7 @@ def calculate_primary_iron_self_sufficiency(
     )
     result["primary_iron_to_demand_ratio"] = np.where(
         result["steel_demand_mt"].gt(0),
-        result["iron_production_mt"] / result["steel_demand_mt"],
+        result["iron_steel_equivalent_mt"] / result["steel_demand_mt"],
         np.nan,
     )
     result["primary_iron_self_sufficiency_pct"] = (
@@ -303,7 +411,7 @@ def plot_primary_iron_self_sufficiency_matrix(data: pd.DataFrame, output_path: P
     fig, axes = plt.subplots(4, 4, figsize=(16, 13), dpi=180, sharex=True, sharey=True)
     fig.suptitle(
         f"{EUROPE_ANALYSIS_LABEL} primary-iron self-sufficiency\n"
-        "Regional primary iron production / regional steel demand",
+        "Steel-equivalent primary iron production / regional steel demand",
         fontsize=17,
     )
     all_years = sorted(pd.to_numeric(data["year"], errors="coerce").dropna().astype(int).unique())

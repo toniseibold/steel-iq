@@ -1142,6 +1142,17 @@ class FurnaceGroup:
         self.created_by_PAM = created_by_PAM
         self.bill_of_materials = bill_of_materials
         self.chosen_reductant = chosen_reductant
+        # Optional policy lock used by quota-forced greenfield projects. It is
+        # an ordinary runtime attribute, so pickle checkpoints retain it.
+        self.quota_reductant_lock: str | None = None
+        # Policy-backed H2-DRI capacity must remain available while the quota
+        # is enabled. The plant still accumulates its real commercial losses;
+        # this flag only prevents the agent from closing or switching it away.
+        self.h2_dri_quota_protected: bool = False
+        # Marks an opportunity whose stored NPV/BOM was evaluated with
+        # hydrogen locked.  The quota planner only forces these candidates.
+        self.h2_dri_quota_candidate: bool = False
+        self.h2_dri_quota_eaf_candidate: bool = False
         self.cost_breakdown_keys = cost_breakdown_keys
         self.carbon_breakdown_keys = carbon_breakdown_keys
         self.allocated_volumes = allocated_volumes
@@ -2970,6 +2981,7 @@ class FurnaceGroup:
         carbon_price: float = 0.0,
         technology_emission_factors: list[TechnologyEmissionFactors] | None = None,
         chosen_emissions_boundary: str = "",
+        forced_reductant: str | None = None,
     ) -> dict[str, float]:
         """
         Calculate energy VOPEX per (metallic charge, reductant) and pick the furnace
@@ -2991,6 +3003,9 @@ class FurnaceGroup:
                 boundary (missing rows raise KeyError rather than scoring as 0).
             chosen_emissions_boundary: Emissions boundary whose direct GHG factor
                 enters the score (e.g. "plant_boundary").
+            forced_reductant: Keep this reductant instead of selecting the
+                lowest-scoring option, while still refreshing its annual energy
+                costs. Used for policy-committed projects.
 
         Returns:
             dict[str, float]: Energy VOPEX per metallic charge for the chosen
@@ -3040,16 +3055,30 @@ class FurnaceGroup:
                     ", ".join(sorted(profiles)),
                 )
 
-        mins = [min(costs, key=lambda k: costs[k]) for costs in score_by_input.values() if costs]
-        counts = Counter(mins)
-        if not counts:
+        available_reductants = {
+            str(reductant) for reductant_costs in score_by_input.values() for reductant in reductant_costs
+        }
+        if not available_reductants:
             # logger.warning(f"No reductants found for furnace group {self.furnace_group_id}")
             self.chosen_reductant = ""
             self.energy_vopex_by_input = {}
             self.energy_vopex_breakdown_by_input = {}
             self.energy_vopex_by_carrier = {}
             return {}
-        most_common_reductant, _ = counts.most_common(1)[0]
+        if forced_reductant is not None:
+            matches = [
+                reductant for reductant in available_reductants if reductant.casefold() == forced_reductant.casefold()
+            ]
+            if not matches:
+                raise ValueError(
+                    f"Forced reductant {forced_reductant!r} is unavailable for furnace group "
+                    f"{self.furnace_group_id}; available reductants: {sorted(available_reductants)}"
+                )
+            most_common_reductant = matches[0]
+        else:
+            mins = [min(costs, key=lambda k: costs[k]) for costs in score_by_input.values() if costs]
+            counts = Counter(mins)
+            most_common_reductant, _ = counts.most_common(1)[0]
 
         previous_reductant = self.chosen_reductant
         self.chosen_reductant = str(most_common_reductant)
@@ -6475,6 +6504,12 @@ class PlantGroup:
         derive_geo_unit: Callable[[float, float, str], str | None] | None = None,
         probabilistic_agents: bool = True,
         increase_sizing_query: Callable[..., float] | None = None,
+        priority_dri_iso3: frozenset[str] = frozenset(),
+        minimum_priority_dri_opportunities: int = 0,
+        h2_dri_quota_candidate_scope: str = "eu",
+        minimum_priority_eaf_opportunities: int = 0,
+        h2_dri_merit_order_steel_demand_t: float | None = None,
+        h2_dri_merit_order_sink: Callable[[list[dict[str, object]]], None] | None = None,
     ) -> commands.Command:
         """
         Identifies new business opportunities for plants at given locations with specific technologies.
@@ -6545,6 +6580,18 @@ class PlantGroup:
                 each candidate's NPV rests on the capacity the policy permits it to build. The
                 opportunity itself is still created at nameplate — what the policy shrinks is the
                 build, not the plan. None (the default) values every candidate at nameplate.
+            priority_dri_iso3: Countries whose best DRI opportunities must survive the
+                normal global top-N truncation for a regional production policy.
+            minimum_priority_dri_opportunities: Minimum number of those regional DRI
+                opportunities to retain in addition to the ordinary selection.
+            h2_dri_quota_candidate_scope: ``"eu"`` evaluates only EU+EFTA+UK
+                quota projects; ``"global"`` also evaluates ROW locations.
+            minimum_priority_eaf_opportunities: Minimum number of European EAF
+                projects valued for immediate construction and reserved for the quota.
+            h2_dri_merit_order_steel_demand_t: Regional steel demand used to truncate
+                the diagnostic hydrogen-DRI merit order. None disables the diagnostic.
+            h2_dri_merit_order_sink: Receives the ranked diagnostic rows. It does not
+                add candidates to the agents' opportunity pool.
 
         Returns:
             Command to add new Plant and FurnaceGroup objects for the identified business opportunities
@@ -6556,6 +6603,7 @@ class PlantGroup:
             prepare_cost_data_for_business_opportunity,
             select_top_opportunities_by_npv,
             get_list_of_allowed_techs_for_target_year,
+            build_h2_dri_merit_order_rows,
         )
         from steelo.domain.calculate_costs import calculate_business_opportunity_npvs
 
@@ -6659,6 +6707,177 @@ class PlantGroup:
             equity_share=equity_share,
             increase_sizing_query=increase_sizing_query,
         )
+
+        # Value DRI with hydrogen locked. The diagnostic retains the ordinary
+        # consideration timeline; quota candidates are valued separately for
+        # immediate construction because the policy bypasses consideration.
+        quota_h2_npvs: dict[str, dict[tuple[float, float, str], dict[str, float]]] = {"iron": {}}
+        quota_h2_cost_data: dict[str, dict[tuple[float, float, str], dict[str, dict[str, Any]]]] = {"iron": {}}
+        quota_eaf_npvs: dict[str, dict[tuple[float, float, str], dict[str, float]]] = {"steel": {}}
+        quota_eaf_cost_data: dict[str, dict[tuple[float, float, str], dict[str, dict[str, Any]]]] = {"steel": {}}
+        if h2_dri_merit_order_sink is not None and h2_dri_merit_order_steel_demand_t is not None:
+            dri_allowed = any(str(tech).casefold() == "dri" for tech in product_to_tech.get("iron", []))
+            scope_locations = {
+                "EU+EFTA+UK": [
+                    site for site in locations.get("iron", []) if str(site["iso3"]).upper() in priority_dri_iso3
+                ],
+                "Non-EU+EFTA+UK": [
+                    site for site in locations.get("iron", []) if str(site["iso3"]).upper() not in priority_dri_iso3
+                ],
+            }
+            merit_rows: list[dict[str, object]] = []
+            scope_counts: dict[str, int] = {}
+            for scope, candidate_locations in scope_locations.items():
+                if not dri_allowed or not candidate_locations:
+                    scope_counts[scope] = 0
+                    continue
+                merit_cost_data = prepare_cost_data_for_business_opportunity(
+                    product_to_tech={"iron": ["DRI"]},
+                    best_locations_subset={"iron": candidate_locations},
+                    current_year=current_year,
+                    target_year=target_year,
+                    energy_costs=input_costs,
+                    capex_dict_all_locs_techs=capex_dict_all_locs_techs,
+                    cost_of_debt_all_locs=cost_of_debt_all_locs,
+                    cost_of_equity_all_locs=cost_of_equity_all_locs,
+                    fopex_all_locs_techs=fopex_all_locs_techs,
+                    steel_plant_capacity=steel_plant_capacity,
+                    plant_lifetime=plant_lifetime,
+                    construction_time=construction_time,
+                    get_bom_from_avg_boms=get_bom_from_avg_boms,
+                    reductant_score_series=reductant_score_series,
+                    iso3_to_region_map=iso3_to_region_map,
+                    global_risk_free_rate=global_risk_free_rate,
+                    capex_subsidies=capex_subsidies,
+                    debt_subsidies=debt_subsidies,
+                    opex_subsidies=opex_subsidies,
+                    energy_subsidies=energy_subsidies,
+                    most_common_reductant=self.most_common_reductant(active_statuses),
+                    environment_most_common_reductant=environment_most_common_reductant,
+                    derive_geo_unit=derive_geo_unit,
+                    forced_reductant="hydrogen",
+                )
+                merit_npvs = calculate_business_opportunity_npvs(
+                    cost_data=merit_cost_data,
+                    target_year=target_year,
+                    market_price=market_price_from_construction_start,
+                    steel_plant_capacity=steel_plant_capacity,
+                    plant_lifetime=plant_lifetime,
+                    construction_time=construction_time,
+                    equity_share=equity_share,
+                    increase_sizing_query=increase_sizing_query,
+                )
+                scope_rows = build_h2_dri_merit_order_rows(
+                    merit_npvs,
+                    merit_cost_data,
+                    investment_year=int(current_year),
+                    target_year=int(target_year),
+                    operation_start_year=int(target_year) + construction_time,
+                    scope=scope,
+                    steel_demand_t=h2_dri_merit_order_steel_demand_t,
+                    candidate_capacity_t=steel_plant_capacity,
+                )
+                merit_rows.extend(scope_rows)
+                scope_counts[scope] = len(scope_rows)
+            if h2_dri_merit_order_sink is not None:
+                h2_dri_merit_order_sink(merit_rows)
+            logger.info(
+                "operation=h2_dri_merit_order year=%d eu_candidates=%d non_eu_candidates=%d demand_t=%.0f",
+                int(current_year),
+                scope_counts.get("EU+EFTA+UK", 0),
+                scope_counts.get("Non-EU+EFTA+UK", 0),
+                h2_dri_merit_order_steel_demand_t,
+            )
+        if minimum_priority_dri_opportunities > 0 and any(
+            str(tech).casefold() == "dri" for tech in product_to_tech.get("iron", [])
+        ):
+            quota_locations = [
+                site
+                for site in locations.get("iron", [])
+                if h2_dri_quota_candidate_scope == "global" or str(site["iso3"]).upper() in priority_dri_iso3
+            ]
+            if quota_locations:
+                quota_h2_cost_data = prepare_cost_data_for_business_opportunity(
+                    product_to_tech={"iron": ["DRI"]},
+                    best_locations_subset={"iron": quota_locations},
+                    current_year=current_year,
+                    target_year=Year(current_year),
+                    energy_costs=input_costs,
+                    capex_dict_all_locs_techs=capex_dict_all_locs_techs,
+                    cost_of_debt_all_locs=cost_of_debt_all_locs,
+                    cost_of_equity_all_locs=cost_of_equity_all_locs,
+                    fopex_all_locs_techs=fopex_all_locs_techs,
+                    steel_plant_capacity=steel_plant_capacity,
+                    plant_lifetime=plant_lifetime,
+                    construction_time=construction_time,
+                    get_bom_from_avg_boms=get_bom_from_avg_boms,
+                    reductant_score_series=reductant_score_series,
+                    iso3_to_region_map=iso3_to_region_map,
+                    global_risk_free_rate=global_risk_free_rate,
+                    capex_subsidies=capex_subsidies,
+                    debt_subsidies=debt_subsidies,
+                    opex_subsidies=opex_subsidies,
+                    energy_subsidies=energy_subsidies,
+                    most_common_reductant=self.most_common_reductant(active_statuses),
+                    environment_most_common_reductant=environment_most_common_reductant,
+                    derive_geo_unit=derive_geo_unit,
+                    forced_reductant="hydrogen",
+                )
+                quota_h2_npvs = calculate_business_opportunity_npvs(
+                    cost_data=quota_h2_cost_data,
+                    target_year=Year(current_year),
+                    market_price=market_price,
+                    steel_plant_capacity=steel_plant_capacity,
+                    plant_lifetime=plant_lifetime,
+                    construction_time=construction_time,
+                    equity_share=equity_share,
+                    increase_sizing_query=increase_sizing_query,
+                )
+        # The ordinary site sampler may contain too few European EAFs to make
+        # the quota physically feasible.  Evaluate all scoped EAF locations in
+        # the same year and merge them into the candidate pool before ranking.
+        if minimum_priority_eaf_opportunities > 0 and any(
+            str(tech).casefold() == "eaf" for tech in product_to_tech.get("steel", [])
+        ):
+            eaf_locations = [
+                site for site in locations.get("steel", []) if str(site["iso3"]).upper() in priority_dri_iso3
+            ]
+            if eaf_locations:
+                quota_eaf_cost_data = prepare_cost_data_for_business_opportunity(
+                    product_to_tech={"steel": ["EAF"]},
+                    best_locations_subset={"steel": eaf_locations},
+                    current_year=current_year,
+                    target_year=Year(current_year),
+                    energy_costs=input_costs,
+                    capex_dict_all_locs_techs=capex_dict_all_locs_techs,
+                    cost_of_debt_all_locs=cost_of_debt_all_locs,
+                    cost_of_equity_all_locs=cost_of_equity_all_locs,
+                    fopex_all_locs_techs=fopex_all_locs_techs,
+                    steel_plant_capacity=steel_plant_capacity,
+                    plant_lifetime=plant_lifetime,
+                    construction_time=construction_time,
+                    get_bom_from_avg_boms=get_bom_from_avg_boms,
+                    reductant_score_series=reductant_score_series,
+                    iso3_to_region_map=iso3_to_region_map,
+                    global_risk_free_rate=global_risk_free_rate,
+                    capex_subsidies=capex_subsidies,
+                    debt_subsidies=debt_subsidies,
+                    opex_subsidies=opex_subsidies,
+                    energy_subsidies=energy_subsidies,
+                    most_common_reductant=self.most_common_reductant(active_statuses),
+                    environment_most_common_reductant=environment_most_common_reductant,
+                    derive_geo_unit=derive_geo_unit,
+                )
+                quota_eaf_npvs = calculate_business_opportunity_npvs(
+                    cost_data=quota_eaf_cost_data,
+                    target_year=Year(current_year),
+                    market_price=market_price,
+                    steel_plant_capacity=steel_plant_capacity,
+                    plant_lifetime=plant_lifetime,
+                    construction_time=construction_time,
+                    equity_share=equity_share,
+                    increase_sizing_query=increase_sizing_query,
+                )
         # G1 CO2 storage gate: drop CCS techs per (iso3, tech) when annual need exceeds
         # country headroom at the opportunity's operating-start lookup year.
         if get_co2_headroom is not None and get_co2_need_by_name is not None:
@@ -6703,6 +6922,64 @@ class PlantGroup:
             probabilistic_agents=probabilistic_agents,
             opportunity_pool_depth=opportunity_pool_depth,
         )
+        quota_h2_keys: set[tuple[str, tuple[float, float, str], str]] = set()
+        if minimum_priority_dri_opportunities > 0:
+            ranked_h2 = sorted(
+                (
+                    (float(npv), product, site_id, tech)
+                    for product, sites in quota_h2_npvs.items()
+                    for site_id, techs in sites.items()
+                    for tech, npv in techs.items()
+                    if str(tech).casefold() == "dri" and math.isfinite(float(npv))
+                ),
+                reverse=True,
+            )[:minimum_priority_dri_opportunities]
+            for npv, product, site_id, tech in ranked_h2:
+                top_business_opportunities.setdefault(product, {}).setdefault(site_id, {})[tech] = npv
+                cost_data.setdefault(product, {}).setdefault(site_id, {})[tech] = quota_h2_cost_data[product][site_id][
+                    tech
+                ]
+                quota_h2_keys.add((product, site_id, tech))
+            retained = len(quota_h2_keys)
+            added = retained
+            logger.info(
+                "operation=h2_dri_candidate_reservation year=%d scope=%s requested=%d retained=%d added=%d",
+                int(current_year),
+                h2_dri_quota_candidate_scope,
+                minimum_priority_dri_opportunities,
+                retained,
+                added,
+            )
+            if retained < minimum_priority_dri_opportunities:
+                logger.warning(
+                    "Only %d of %d required regional DRI opportunities were available after NPV evaluation",
+                    retained,
+                    minimum_priority_dri_opportunities,
+                )
+        quota_eaf_keys: set[tuple[str, tuple[float, float, str], str]] = set()
+        if minimum_priority_eaf_opportunities > 0:
+            ranked_eaf = sorted(
+                (
+                    (float(npv), product, site_id, tech)
+                    for product, sites in quota_eaf_npvs.items()
+                    for site_id, techs in sites.items()
+                    for tech, npv in techs.items()
+                    if str(tech).casefold() == "eaf" and math.isfinite(float(npv))
+                ),
+                reverse=True,
+            )[:minimum_priority_eaf_opportunities]
+            for npv, product, site_id, tech in ranked_eaf:
+                top_business_opportunities.setdefault(product, {}).setdefault(site_id, {})[tech] = npv
+                cost_data.setdefault(product, {}).setdefault(site_id, {})[tech] = quota_eaf_cost_data[product][site_id][
+                    tech
+                ]
+                quota_eaf_keys.add((product, site_id, tech))
+            logger.info(
+                "operation=regional_eaf_candidate_reservation year=%d requested=%d retained=%d",
+                int(current_year),
+                minimum_priority_eaf_opportunities,
+                len(quota_eaf_keys),
+            )
         selected_counts, selected_total = _count_entries(top_business_opportunities)
         candidate_stats["selected_pairs_total"] = selected_total
         for product, value in selected_counts.items():
@@ -6728,6 +7005,13 @@ class PlantGroup:
                         disposal_cost_outputs=disposal_cost_outputs,
                         derive_geo_unit=derive_geo_unit,
                     )
+                    if (product, site_id, tech) in quota_h2_keys:
+                        quota_fg = new_plant.furnace_groups[0]
+                        quota_fg.quota_reductant_lock = "hydrogen"
+                        quota_fg.chosen_reductant = "hydrogen"
+                        quota_fg.h2_dri_quota_candidate = True
+                    if (product, site_id, tech) in quota_eaf_keys:
+                        new_plant.furnace_groups[0].h2_dri_quota_eaf_candidate = True
                     all_plant_ids.append(new_plant.plant_id)
                     new_plants.append(new_plant)
         candidate_stats["new_plants_created"] = len(new_plants)
@@ -8906,6 +9190,7 @@ class Environment:
         end_year: Year,
         overrides: dict[str, float] | None = None,
         override_reference_year: Year | None = None,
+        forced_reductant: str | None = None,
     ) -> "ReductantScoreSeries":
         """
         Year-wise reductant-optimised score series for a candidate technology.
@@ -8927,6 +9212,8 @@ class Environment:
             end_year: Last operating year (exclusive).
             overrides / override_reference_year: Site-price overrides, see
                 candidate_energy_costs_for_year.
+            forced_reductant: Optional counterfactual reductant to use in every
+                operating year instead of choosing the annual minimum-cost option.
 
         Returns:
             ReductantScoreSeries with one score and one pick per operating year.
@@ -8965,13 +9252,22 @@ class Environment:
                 ef_by_key,
                 self.config.disposal_cost_outputs,
             )
-            mins = [min(costs, key=lambda k: costs[k]) for costs in year_scores.score_by_input.values() if costs]
-            counts = Counter(mins)
-            if not counts:
-                scores.append(0.0)
-                picks.append("")
-                continue
-            pick, _ = counts.most_common(1)[0]
+            if forced_reductant is not None:
+                pick = normalize_name(forced_reductant)
+                missing = [charge for charge in output_shares if pick not in year_scores.score_by_input.get(charge, {})]
+                if missing:
+                    raise ValueError(
+                        f"Reductant '{forced_reductant}' is unavailable for {technology_name} "
+                        f"at {location.geo_key}; missing charges: {', '.join(sorted(missing))}"
+                    )
+            else:
+                mins = [min(costs, key=lambda k: costs[k]) for costs in year_scores.score_by_input.values() if costs]
+                counts = Counter(mins)
+                if not counts:
+                    scores.append(0.0)
+                    picks.append("")
+                    continue
+                pick, _ = counts.most_common(1)[0]
             value = sum(
                 share * year_scores.score_by_input[charge][pick]
                 for charge, share in output_shares.items()
@@ -9021,12 +9317,16 @@ class Environment:
                 fg.technology.set_product(self.technology_to_product)
                 # Closed/discarded FGs keep their frozen reductant choice; the dynamic
                 # business case and breakdown keys are still attached for other readers.
+                quota_reductant_lock = getattr(fg, "quota_reductant_lock", None)
                 if fg.status.lower() not in ("closed", "discarded"):
                     fg.generate_energy_vopex_by_reductant(
                         carbon_price=carbon_price,
                         technology_emission_factors=self.technology_emission_factors,
                         chosen_emissions_boundary=self.config.chosen_emissions_boundary_for_carbon_costs,
+                        forced_reductant=quota_reductant_lock,
                     )
+                elif quota_reductant_lock is not None:
+                    fg.chosen_reductant = quota_reductant_lock
                 fg.cost_breakdown_keys = self.cost_breakdown_keys
                 fg.carbon_breakdown_keys = self.carbon_breakdown_keys
 

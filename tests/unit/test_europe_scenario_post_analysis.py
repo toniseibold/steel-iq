@@ -6,6 +6,7 @@ import pytest
 from steelo.adapters.dataprocessing.postprocessing.europe_scenario_post_analysis import (
     ScenarioInput,
     _europe_iso3,
+    _iron_steel_equivalent_by_year,
     _steel_origin_by_year,
     aggregate_trade_partners,
     calculate_primary_iron_self_sufficiency,
@@ -104,8 +105,20 @@ def test_load_europe_steel_demand_uses_fixed_scope_scenario_and_units(tmp_path: 
 def test_primary_iron_self_sufficiency_uses_iron_and_preserves_uncapped_ratio():
     production = pd.DataFrame(
         [
-            {"scenario_index": 0, "scenario_title": "E-W", "year": 2030, "iron_production_mt": 40.0},
-            {"scenario_index": 0, "scenario_title": "E-W", "year": 2040, "iron_production_mt": 120.0},
+            {
+                "scenario_index": 0,
+                "scenario_title": "E-W",
+                "year": 2030,
+                "iron_production_mt": 45.0,
+                "iron_steel_equivalent_mt": 40.0,
+            },
+            {
+                "scenario_index": 0,
+                "scenario_title": "E-W",
+                "year": 2040,
+                "iron_production_mt": 135.0,
+                "iron_steel_equivalent_mt": 120.0,
+            },
         ]
     )
     demand = pd.DataFrame(
@@ -121,6 +134,48 @@ def test_primary_iron_self_sufficiency_uses_iron_and_preserves_uncapped_ratio():
     assert result.loc[2030, "primary_iron_self_sufficiency_pct"] == pytest.approx(40.0)
     assert result.loc[2040, "primary_iron_to_demand_ratio"] == pytest.approx(1.2)
     assert result.loc[2040, "primary_iron_self_sufficiency_pct"] == pytest.approx(100.0)
+
+
+def test_iron_production_is_converted_to_steel_equivalent_by_route():
+    rows = [
+        {
+            "year": 2050,
+            "furnace_group_id": "bf",
+            "technology": "BF",
+            "production": 113.512,
+            "feedstock": "io_high",
+            "demand": 0.0,
+        },
+        {
+            "year": 2050,
+            "furnace_group_id": "dri-high",
+            "technology": "DRI",
+            "production": 117.0923,
+            "feedstock": "io_high",
+            "demand": 117.0923 * 1.357472,
+        },
+        {
+            "year": 2050,
+            "furnace_group_id": "dri-low",
+            "technology": "DRI+CCS",
+            "production": 145.5669,
+            "feedstock": "io_low",
+            "demand": 145.5669 * 1.350382,
+        },
+        {
+            "year": 2050,
+            "furnace_group_id": "electrolysis",
+            "technology": "E-WIN",
+            "production": 104.7573,
+            "feedstock": "io_high",
+            "demand": 0.0,
+        },
+    ]
+
+    result = _iron_steel_equivalent_by_year(pd.DataFrame(rows)).iloc[0]
+
+    assert result["iron_production_t"] == pytest.approx(480.9285)
+    assert result["iron_steel_equivalent_t"] == pytest.approx(400.0)
 
 
 def test_small_partner_flows_are_combined_as_rest():

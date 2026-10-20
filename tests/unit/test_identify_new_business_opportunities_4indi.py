@@ -7,9 +7,11 @@ from steelo.domain.new_plant_opening import (
     get_list_of_allowed_techs_for_target_year,
     prepare_cost_data_for_business_opportunity,
     select_top_opportunities_by_npv,
+    retain_priority_dri_opportunities,
     build_eligible_pool,
     summarise_opportunity_pool,
     NewPlantLocation,
+    build_h2_dri_merit_order_rows,
 )
 from steelo.domain.models import Subsidy, PlantGroup
 from steelo.devdata import Year
@@ -20,6 +22,66 @@ from steelo.domain.calculate_costs import ReductantScoreSeries
 def _stub_series(location, tech, output_shares, start, end, **kwargs):
     n = int(end) - int(start)
     return ReductantScoreSeries(scores=[0.0] * n, picks=["scrap"] * n)
+
+
+def test_priority_dri_candidates_survive_global_top_n_selection():
+    selected = {"iron": {(24.0, 45.0, "SAU"): {"DRI": 300.0}}}
+    npv_dict = {
+        "iron": {
+            (24.0, 45.0, "SAU"): {"DRI": 300.0},
+            (51.0, 10.0, "DEU"): {"DRI": 120.0},
+            (62.0, 15.0, "SWE"): {"DRI": 150.0},
+            (48.0, 2.0, "FRA"): {"BF": 500.0},
+        }
+    }
+
+    retained, added = retain_priority_dri_opportunities(
+        selected,
+        npv_dict,
+        frozenset({"DEU", "SWE", "FRA"}),
+        minimum_count=2,
+    )
+
+    assert added == 2
+    assert retained["iron"][(62.0, 15.0, "SWE")]["DRI"] == 150.0
+    assert retained["iron"][(51.0, 10.0, "DEU")]["DRI"] == 120.0
+
+
+def test_h2_dri_merit_order_stops_at_demand_and_clips_last_candidate():
+    sites = {
+        (50.0, 10.0, "DEU"): {"DRI": 30.0},
+        (60.0, 15.0, "SWE"): {"DRI": -10.0},
+        (46.0, 8.0, "CHE"): {"DRI": -20.0},
+    }
+    details = {
+        "iron": {
+            site: {
+                "DRI": {
+                    "reductant": "hydrogen",
+                    "utilization_rate": 0.8,
+                    "energy_costs": {"electricity": 50.0, "hydrogen": 3_000.0},
+                }
+            }
+            for site in sites
+        }
+    }
+
+    rows = build_h2_dri_merit_order_rows(
+        {"iron": sites},
+        details,
+        investment_year=2030,
+        target_year=2034,
+        operation_start_year=2038,
+        scope="EU+EFTA+UK",
+        steel_demand_t=150.0,
+        candidate_capacity_t=100.0,
+    )
+
+    assert [row["iso3"] for row in rows] == ["DEU", "SWE"]
+    assert {row["scope"] for row in rows} == {"EU+EFTA+UK"}
+    assert [row["capacity_counted_t"] for row in rows] == [100.0, 50.0]
+    assert rows[-1]["cumulative_capacity_t"] == 150.0
+    assert rows[1]["indicative_policy_support_npv_usd"] == 10.0
 
 
 class TestSelectLocationSubset:

@@ -129,6 +129,23 @@ def test_series_picks_flip_at_the_crossover(tmp_path: Path) -> None:
     assert all(pick == "hydrogen" for pick in series.picks[flip:])
 
 
+def test_series_can_lock_hydrogen_for_counterfactual_npv(tmp_path: Path) -> None:
+    """A diagnostic merit-order valuation can hold DRI on hydrogen in every year."""
+
+    env = _make_env(tmp_path, carbon_by_year={y: 100.0 for y in range(2025, 2031)})
+    series = env.reductant_score_series(
+        LOCATION,
+        "DRI",
+        SHARES,
+        Year(2025),
+        Year(2031),
+        forced_reductant="hydrogen",
+    )
+
+    assert series.picks == ["hydrogen"] * len(YEARS)
+    assert series.scores == pytest.approx(_fixed_reductant_scores(env, "hydrogen", YEARS))
+
+
 def test_series_pick_matches_annual_repick_rule(tmp_path: Path) -> None:
     """For any year, the series pick equals what the B5 annual re-pick would choose."""
     from steelo.domain.models import FurnaceGroup, PointInTime, Technology, TimeFrame

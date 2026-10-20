@@ -20,6 +20,7 @@ from steelo.simulation_types import TechSettingsMap, get_default_technology_sett
 from steelo.utilities.memory_profiling import MemoryTracker
 
 from .capacity_policy.config import CapacityPolicyConfig
+from .h2_dri_quota.config import H2DRIQuotaConfig
 from .domain import Year, Plant, PlantGroup
 from .domain.constants import CONSTRUCTION_TIME_DEFAULT, RANDOM_SEED_DEFAULT
 from .service_layer.message_bus import MessageBus
@@ -392,6 +393,8 @@ class SimulationConfig:
     # === China capacity-replacement policy ===
     # Dormant by default; data comes from the optional Capacity pool sheets
     capacity_policy: CapacityPolicyConfig = field(default_factory=CapacityPolicyConfig)
+    # Optional EU27+EFTA+UK hydrogen-DRI production quota; dormant by default.
+    h2_dri_quota: H2DRIQuotaConfig = field(default_factory=H2DRIQuotaConfig)
     # New plant opening
     consideration_time: int = (
         3  # Minimum number of years a considered business opportunity needs to be NPV-positive before being announced
@@ -1565,6 +1568,17 @@ class SimulationRunner:
             )
             if price_plot_path is not None:
                 logger.info(f"Saved market prices plot to {price_plot_path}")
+
+        if self.config.h2_dri_quota.enabled:
+            from steelo.h2_dri_quota.reporting import generate_h2_dri_quota_report
+
+            quota_outputs = generate_h2_dri_quota_report(
+                post_processed_csv=Path(output_path),
+                tm_dir=self.config.output_dir / "TM",
+                output_dir=self.config.output_dir / "data" / "h2_dri_quota",
+                config=self.config.h2_dri_quota,
+            )
+            logger.info("Generated EU H2-DRI quota outputs: %s", ", ".join(map(str, quota_outputs)))
 
         # Interactive viewers (self-contained plotly HTML) under plots/interactive; after the
         # market-prices export so the cost curves can read the recorded steel demand

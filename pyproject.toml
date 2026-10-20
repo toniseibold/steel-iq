@@ -122,6 +122,8 @@ analyse-production-cost-emissions="steelo.adapters.dataprocessing.postprocessing
 analyse-emissions-subsidies="steelo.adapters.dataprocessing.postprocessing.emissions_subsidy_timeseries:main"
 analyse-world-scenarios="steelo.adapters.dataprocessing.postprocessing.world_scenario_analysis:main"
 analyse-europe-scenarios="steelo.adapters.dataprocessing.postprocessing.europe_scenario_post_analysis:main"
+analyse-h2-dri-quota="steelo.adapters.dataprocessing.postprocessing.h2_dri_quota_comparison:main"
+analyse-h2-dri-scopes="steelo.adapters.dataprocessing.postprocessing.h2_dri_scope_comparison:main"
 
 [tool.pytest.ini_options]
 addopts = "-ra"

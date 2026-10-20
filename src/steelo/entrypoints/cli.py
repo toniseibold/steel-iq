@@ -10,6 +10,7 @@ import logging
 import subprocess
 import shutil
 import json
+from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from typing import Dict
 from collections import defaultdict
@@ -23,6 +24,16 @@ from ..domain.constants import RANDOM_SEED_DEFAULT
 from ..simulation import SimulationConfig
 from ..bootstrap import bootstrap_simulation
 from ..utils.symlink_manager import update_data_symlink, update_output_symlink, setup_legacy_symlinks
+
+
+def _json_config_value(value):
+    """Convert nested dataclass/path config values into useful JSON data."""
+
+    if isinstance(value, Path):
+        return str(value)
+    if is_dataclass(value) and not isinstance(value, type):
+        return {key: _json_config_value(item) for key, item in asdict(value).items()}
+    return value
 
 
 def run_full_simulation() -> None:
@@ -232,6 +243,38 @@ def run_full_simulation() -> None:
         action="store_true",
         help="Rebate the carbon already paid on exports leaving a carbon border region (default: disabled)",
     )
+    parser.add_argument(
+        "--enable-eu-h2-dri-quota",
+        action="store_true",
+        help="Enable the EU27+EFTA+UK hydrogen-DRI production quota (default: disabled)",
+    )
+    parser.add_argument(
+        "--eu-h2-dri-quota-share",
+        type=float,
+        default=0.10,
+        help="Share of EU27+EFTA+UK steel demand covered by domestic H2-DRI (default: 0.10)",
+    )
+    parser.add_argument(
+        "--eu-h2-dri-quota-start-year",
+        type=int,
+        default=2030,
+        help="First year in which the H2-DRI production quota binds (default: 2030)",
+    )
+    parser.add_argument(
+        "--eu-h2-dri-overbuild-margin",
+        type=float,
+        default=0.10,
+        help="Extra nameplate capacity planned above the production floor (default: 0.10)",
+    )
+    parser.add_argument(
+        "--eu-h2-dri-candidate-scope",
+        choices=("eu", "global"),
+        default="eu",
+        help=(
+            "Locations eligible for quota-forced H2-DRI: 'eu' limits the merit order to "
+            "EU27+EFTA+UK; 'global' also permits ROW plants supplying European EAFs (default: eu)"
+        ),
+    )
 
     # Parse the command-line arguments
     try:
@@ -241,6 +284,10 @@ def run_full_simulation() -> None:
             parser.error("--credit-validity-years must be a positive number of years")
         if args.credit_validity_years is not None and not args.enable_capacity_policy:
             parser.error("--credit-validity-years requires --enable-capacity-policy")
+        if not 0.0 <= args.eu_h2_dri_quota_share <= 1.0:
+            parser.error("--eu-h2-dri-quota-share must be within [0, 1]")
+        if args.eu_h2_dri_overbuild_margin < 0.0:
+            parser.error("--eu-h2-dri-overbuild-margin must be non-negative")
 
         # Setup directories
         steelo_home = Path(args.steelo_home)
@@ -407,9 +454,20 @@ def run_full_simulation() -> None:
             if args.cbam_rebate:
                 config.carbon_border_export_rebates = True
                 console.print("[green]Carbon border export rebates enabled[/green]")
+            if args.enable_eu_h2_dri_quota:
+                config.h2_dri_quota.enabled = True
+                config.h2_dri_quota.demand_share = args.eu_h2_dri_quota_share
+                config.h2_dri_quota.start_year = args.eu_h2_dri_quota_start_year
+                config.h2_dri_quota.overbuild_margin = args.eu_h2_dri_overbuild_margin
+                config.h2_dri_quota.candidate_scope = args.eu_h2_dri_candidate_scope
+                console.print(
+                    "[green]EU27+EFTA+UK H2-DRI quota enabled: "
+                    f"{args.eu_h2_dri_quota_share:.1%} from {args.eu_h2_dri_quota_start_year}; "
+                    f"candidate scope={args.eu_h2_dri_candidate_scope}[/green]"
+                )
 
             # Save config and metadata
-            config_dict = {k: str(v) if isinstance(v, Path) else v for k, v in config.__dict__.items()}
+            config_dict = {k: _json_config_value(v) for k, v in config.__dict__.items()}
             config_path = output_dir / "simulation_config.json"
             config_path.write_text(json.dumps(config_dict, indent=2, default=str))
 
@@ -517,9 +575,20 @@ def run_full_simulation() -> None:
                 if args.cbam_rebate:
                     config.carbon_border_export_rebates = True
                     console.print("[green]Carbon border export rebates enabled[/green]")
+                if args.enable_eu_h2_dri_quota:
+                    config.h2_dri_quota.enabled = True
+                    config.h2_dri_quota.demand_share = args.eu_h2_dri_quota_share
+                    config.h2_dri_quota.start_year = args.eu_h2_dri_quota_start_year
+                    config.h2_dri_quota.overbuild_margin = args.eu_h2_dri_overbuild_margin
+                    config.h2_dri_quota.candidate_scope = args.eu_h2_dri_candidate_scope
+                    console.print(
+                        "[green]EU27+EFTA+UK H2-DRI quota enabled: "
+                        f"{args.eu_h2_dri_quota_share:.1%} from {args.eu_h2_dri_quota_start_year}; "
+                        f"candidate scope={args.eu_h2_dri_candidate_scope}[/green]"
+                    )
 
                 # Save config and metadata
-                config_dict = {k: str(v) if isinstance(v, Path) else v for k, v in config.__dict__.items()}
+                config_dict = {k: _json_config_value(v) for k, v in config.__dict__.items()}
                 config_path = output_dir / "simulation_config.json"
                 config_path.write_text(json.dumps(config_dict, indent=2, default=str))
 

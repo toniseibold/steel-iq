@@ -19,6 +19,80 @@ class NewPlantLocation(TypedDict):
     rail_cost: float
 
 
+def build_h2_dri_merit_order_rows(
+    npv_dict: dict[str, dict[tuple[float, float, str], dict[str, float]]],
+    cost_data: dict[str, dict[tuple[float, float, str], dict[str, dict[str, Any]]]],
+    *,
+    investment_year: int,
+    target_year: int,
+    operation_start_year: int,
+    scope: str,
+    steel_demand_t: float,
+    candidate_capacity_t: float,
+) -> list[dict[str, object]]:
+    """Rank hydrogen-locked DRI counterfactuals in one scope up to steel demand.
+
+    The caller supplies an already region-filtered and hydrogen-forced candidate
+    set. The last project is retained in full, while ``capacity_counted_t`` is
+    clipped so the cumulative merit-order volume ends exactly at demand.
+    """
+
+    if steel_demand_t <= 0.0 or candidate_capacity_t <= 0.0:
+        return []
+
+    candidates: list[tuple[float, tuple[float, float, str], dict[str, Any]]] = []
+    for site_id, technologies in npv_dict.get("iron", {}).items():
+        npv = technologies.get("DRI")
+        details = cost_data.get("iron", {}).get(site_id, {}).get("DRI")
+        if npv is None or details is None or not np.isfinite(npv):
+            continue
+        candidates.append((float(npv), site_id, details))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+
+    rows: list[dict[str, object]] = []
+    cumulative = 0.0
+    for rank, (npv, (latitude, longitude, iso3), details) in enumerate(candidates, start=1):
+        if cumulative >= steel_demand_t:
+            break
+        counted_capacity = min(candidate_capacity_t, steel_demand_t - cumulative)
+        cumulative += counted_capacity
+        energy_costs = details.get("energy_costs", {})
+        support = max(0.0, -npv)
+        rows.append(
+            {
+                "investment_year": investment_year,
+                "target_year": target_year,
+                "operation_start_year": operation_start_year,
+                "scope": scope,
+                "steel_demand_scope": "EU+EFTA+UK",
+                "steel_demand_t": steel_demand_t,
+                "rank": rank,
+                "iso3": iso3,
+                "latitude": latitude,
+                "longitude": longitude,
+                "technology": "DRI",
+                "forced_reductant": "hydrogen",
+                "capacity_t": candidate_capacity_t,
+                "capacity_counted_t": counted_capacity,
+                "cumulative_capacity_t": cumulative,
+                "utilization_rate": details.get("utilization_rate"),
+                "expected_production_t": candidate_capacity_t * float(details.get("utilization_rate", 0.0)),
+                "npv_usd": npv,
+                "npv_usd_per_t_capacity": npv / candidate_capacity_t,
+                "indicative_policy_support_npv_usd": support,
+                "support_usd_per_t_capacity": support / candidate_capacity_t,
+                "capex_usd_per_t_capacity": details.get("capex"),
+                "fopex_usd_per_t_capacity_year": details.get("fopex"),
+                "cost_of_debt": details.get("cost_of_debt"),
+                "cost_of_equity": details.get("cost_of_equity"),
+                "railway_cost_usd": details.get("railway_cost"),
+                "electricity_price": energy_costs.get("electricity"),
+                "hydrogen_price": energy_costs.get("hydrogen"),
+            }
+        )
+    return rows
+
+
 def select_location_subset(
     locations: dict,
     calculate_npv_sites_share: float,
@@ -139,6 +213,7 @@ def prepare_cost_data_for_business_opportunity(
     most_common_reductant: dict[str, str],
     environment_most_common_reductant: dict[str, str],
     derive_geo_unit: Callable[[float, float, str], str | None] | None = None,
+    forced_reductant: str | None = None,
 ) -> dict[str, dict[tuple[float, float, str], dict[str, dict[str, Any]]]]:
     """
     For each business opportunity (top location-technology pair), prepare all required inputs to calculate the NPV
@@ -173,6 +248,8 @@ def prepare_cost_data_for_business_opportunity(
             the geospatial adapter, admin-1 layer cached across the whole sites iteration) so
             candidate sites collect province-scoped subsidies; the same derivation runs at spawn,
             so evaluation and spawn always agree
+        forced_reductant: Optional reductant lock for a counterfactual valuation.
+            Ordinary agent candidates leave this unset.
 
     Returns:
         cost_data: Dictionary with all prepared cost data per product, site (lat, lon, iso3), and technology (product -> site_id ->
@@ -321,7 +398,9 @@ def prepare_cost_data_for_business_opportunity(
                     energy_costs_tech,
                     tech,
                     int(steel_plant_capacity),
-                    most_common_reductant.get(tech, environment_most_common_reductant.get(tech)),
+                    forced_reductant
+                    if forced_reductant is not None
+                    else most_common_reductant.get(tech, environment_most_common_reductant.get(tech)),
                 )
                 bill_of_materials, util_rate, reductant, output_shares = bom_result
                 if bill_of_materials is None:
@@ -350,8 +429,9 @@ def prepare_cost_data_for_business_opportunity(
                         Year(target_year + construction_time + plant_lifetime),
                         overrides=site_overrides,
                         override_reference_year=current_year,
+                        forced_reductant=forced_reductant,
                     )
-                    committed_reductant = score_series.picks[0] if score_series.picks else ""
+                    committed_reductant = forced_reductant or (score_series.picks[0] if score_series.picks else "")
                     if committed_reductant != reductant:
                         # Commit the BOM the start-year pick implies (materials are
                         # reductant-invariant; only the energy rows follow the pick)
@@ -843,3 +923,47 @@ def select_top_opportunities_by_npv(
             logger.info(f"{site_str} {'; '.join(tech_strs)}")
 
     return top_business_opportunities
+
+
+def retain_priority_dri_opportunities(
+    selected: dict[str, dict[tuple[float, float, str], dict[str, float]]],
+    npv_dict: dict[str, dict[tuple[float, float, str], dict[str, float]]],
+    priority_iso3: frozenset[str],
+    minimum_count: int,
+) -> tuple[dict[str, dict[tuple[float, float, str], dict[str, float]]], int]:
+    """Ensure the best regional DRI candidates survive global top-N selection.
+
+    Returns the augmented selection and the number of candidates added. Existing
+    selected regional DRI pairs count towards ``minimum_count``.
+    """
+
+    if minimum_count <= 0 or not priority_iso3:
+        return selected, 0
+    candidates = sorted(
+        (
+            (float(npv), product, site_id, tech)
+            for product, sites in npv_dict.items()
+            for site_id, techs in sites.items()
+            for tech, npv in techs.items()
+            if site_id[2] in priority_iso3 and str(tech).casefold() == "dri" and np.isfinite(float(npv))
+        ),
+        reverse=True,
+    )
+    retained = {
+        (product, site_id, tech)
+        for product, sites in selected.items()
+        for site_id, techs in sites.items()
+        for tech in techs
+        if site_id[2] in priority_iso3 and str(tech).casefold() == "dri"
+    }
+    added = 0
+    for npv, product, site_id, tech in candidates:
+        if len(retained) >= minimum_count:
+            break
+        key = (product, site_id, tech)
+        if key in retained:
+            continue
+        selected.setdefault(product, {}).setdefault(site_id, {})[tech] = npv
+        retained.add(key)
+        added += 1
+    return selected, added
